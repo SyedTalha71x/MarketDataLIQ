@@ -30,7 +30,6 @@ if (!FIX_SERVER || !FIX_PORT || !SENDER_COMP_ID || !TARGET_COMP_ID || !USERNAME 
 }
 
 let sequenceNumber = 0;
-let heartbeatInterval: NodeJS.Timeout;
 let isConnected = false;
 let reconnectTimeout: NodeJS.Timeout | null = null;
 
@@ -332,6 +331,7 @@ class FixClient {
     private reconnectAttempts: number = 0;
     private readonly maxReconnectAttempts: number = 1000;
     private readonly reconnectDelay: number = 5000;
+    private buffer: string = '';
 
     constructor() {
         this.initializeClient();
@@ -424,6 +424,7 @@ class FixClient {
         console.log('Connected to FIX server');
         isConnected = true;
         this.reconnectAttempts = 0;
+        this.buffer = '';
 
         const logonMessage = createFixMessage({
             35: 'A',
@@ -438,112 +439,142 @@ class FixClient {
         const parsed = this.parseFixMessage(logonMessage);
         console.log('Logon sent');
         this.logParsedMessage(parsed, 'Sent');
-
-        // Comment out heartbeat setup
-        /* 
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        heartbeatInterval = setInterval(() => {
-            if (this.client.writable) {
-                const heartbeat = createFixMessage({ 35: '0' });
-                this.client.write(heartbeat);
-                console.log('Heartbeat sent');
-            }
-        }, 25000);
-        */
         
-        // Subscribe to market data after successful login
-        setTimeout(() => {
-            this.subscribeToMarketData();
-        }, 2000);
+        // We'll wait for the logon response before subscribing
+        // The subscription will be triggered in handleData when we receive a logon response
     }
 
     private handleData(data: Buffer) {
-        const message = data.toString();
+        // Append the new data to our buffer
+        this.buffer += data.toString();
         
-        // Log the raw message for debugging
-        console.log('RAW MESSAGE RECEIVED:', message);
+        // Process any complete FIX messages in the buffer
+        const messages = this.extractMessages();
         
-        const parsed = this.parseFixMessage(message);
-        this.logParsedMessage(parsed, 'Received');
-    
-        // Process market data messages
-        if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
-            console.log('Received market data response!');
+        for (const message of messages) {
+            // Log the raw message for debugging
+            console.log('RAW MESSAGE RECEIVED:', message);
             
-            try {
-                // Extract market data entries
-                const noMDEntries = parseInt(parsed.additionalFields['268'] || '0');
-                const symbol = parsed.additionalFields['55'] || '';
+            const parsed = this.parseFixMessage(message);
+            this.logParsedMessage(parsed, 'Received');
+        
+            // Process market data messages
+            if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
+                console.log('Received market data response!');
                 
-                console.log(`Got market data for symbol: ${symbol}, entries: ${noMDEntries}`);
-                
-                if (noMDEntries > 0 && symbol) {
-                    // Remove the check for subscribedPairs.has(symbol) to process all incoming data
-                    console.log(`Processing ${noMDEntries} market data entries for ${symbol}`);
+                try {
+                    // Extract market data entries
+                    const noMDEntries = parseInt(parsed.additionalFields['268'] || '0');
+                    const symbol = parsed.additionalFields['55'] || '';
                     
-                    // Process each entry
-                    for (let i = 1; i <= noMDEntries; i++) {
-                        const typeTag = `269.${i}`;
-                        const priceTag = `270.${i}`;
-                        const sizeTag = `271.${i}`;
-                        const timeTag = `273.${i}`;
+                    console.log(`Got market data for symbol: ${symbol}, entries: ${noMDEntries}`);
+                    
+                    if (noMDEntries > 0 && symbol) {
+                        // Process all incoming data regardless of subscription status
+                        console.log(`Processing ${noMDEntries} market data entries for ${symbol}`);
                         
-                        console.log(`Entry ${i} - Type: ${parsed.additionalFields[typeTag]}, Price: ${parsed.additionalFields[priceTag]}`);
-                        
-                        if (parsed.additionalFields[typeTag] && parsed.additionalFields[priceTag]) {
-                            const entryType = parsed.additionalFields[typeTag];
-                            const price = parseFloat(parsed.additionalFields[priceTag]);
-                            const size = parseInt(parsed.additionalFields[sizeTag] || '0');
-                            const time = parsed.additionalFields[timeTag] || '';
+                        // Process each entry
+                        for (let i = 1; i <= noMDEntries; i++) {
+                            const typeTag = `269.${i}`;
+                            const priceTag = `270.${i}`;
+                            const sizeTag = `271.${i}`;
+                            const timeTag = `273.${i}`;
                             
-                            if (['0', '1'].includes(entryType)) { // BID or ASK
-                                const type = MD_ENTRY_TYPES[entryType];
+                            console.log(`Entry ${i} - Type: ${parsed.additionalFields[typeTag]}, Price: ${parsed.additionalFields[priceTag]}`);
+                            
+                            if (parsed.additionalFields[typeTag] && parsed.additionalFields[priceTag]) {
+                                const entryType = parsed.additionalFields[typeTag];
+                                const price = parseFloat(parsed.additionalFields[priceTag]);
+                                const size = parseInt(parsed.additionalFields[sizeTag] || '0');
+                                const time = parsed.additionalFields[timeTag] || '';
                                 
-                                console.log(`Found ${type} entry for ${symbol}: Price=${price}, Size=${size}`);
-                                
-                                // Create market data message and add to queue
-                                const marketData: MarketDataMessage = {
-                                    symbol,
-                                    type: type as 'BID' | 'ASK',
-                                    price,
-                                    quantity: size,
-                                    timestamp: new Date().toISOString(),
-                                    rawData: {
-                                        '55': symbol,
-                                        '262': parsed.additionalFields['262'] || '',
-                                        '268': parsed.additionalFields['268'] || '',
-                                        '269': entryType,
-                                        '270': price.toString(),
-                                        '271': size.toString(),
-                                        '273': time
-                                    }
-                                };
-                                
-                                // Add to Bull queue
-                                console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
-                                marketDataQueue.add(marketData, { 
-                                    jobId: `${symbol}_${type}_${Date.now()}` 
-                                });
-                                
-                                console.log(`Added ${type} data for ${symbol} to queue: ${price}`);
+                                if (['0', '1'].includes(entryType)) { // BID or ASK
+                                    const type = MD_ENTRY_TYPES[entryType];
+                                    
+                                    console.log(`Found ${type} entry for ${symbol}: Price=${price}, Size=${size}`);
+                                    
+                                    // Create market data message and add to queue
+                                    const marketData: MarketDataMessage = {
+                                        symbol,
+                                        type: type as 'BID' | 'ASK',
+                                        price,
+                                        quantity: size,
+                                        timestamp: new Date().toISOString(),
+                                        rawData: {
+                                            '55': symbol,
+                                            '262': parsed.additionalFields['262'] || '',
+                                            '268': parsed.additionalFields['268'] || '',
+                                            '269': entryType,
+                                            '270': price.toString(),
+                                            '271': size.toString(),
+                                            '273': time
+                                        }
+                                    };
+                                    
+                                    // Add to Bull queue
+                                    console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
+                                    marketDataQueue.add(marketData, { 
+                                        jobId: `${symbol}_${type}_${Date.now()}` 
+                                    });
+                                    
+                                    console.log(`Added ${type} data for ${symbol} to queue: ${price}`);
+                                }
                             }
                         }
+                    } else {
+                        console.log(`No market data entries found for ${symbol || 'unknown symbol'}`);
                     }
-                } else {
-                    console.log(`No market data entries found for ${symbol || 'unknown symbol'}`);
+                } catch (error) {
+                    console.error('Error processing market data:', error);
                 }
-            } catch (error) {
-                console.error('Error processing market data:', error);
+            } else if (parsed.messageType === 'Reject') {
+                console.error('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
+            } else if (parsed.messageType === 'Logon') {
+                console.log('Logon response received, authentication successful');
+                // Subscribe after successful logon with a small delay
+                setTimeout(() => {
+                    this.subscribeToMarketData();
+                }, 1000);
+            } else if (parsed.messageType === 'Heartbeat') {
+                console.log('Received heartbeat from server');
+                // Just log it, no action needed
+            } else {
+                console.log(`Received message of type: ${parsed.messageType}`);
             }
-        } else if (parsed.messageType === 'Reject') {
-            console.error('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
-        } else if (parsed.messageType === 'Logon') {
-            console.log('Logon response received, authentication successful');
-            // Subscribe immediately after successful logon
-            this.subscribeToMarketData();
-        } else {
-            console.log(`Received message of type: ${parsed.messageType}`);
         }
+    }
+
+    // Extract complete FIX messages from the buffer
+    private extractMessages(): string[] {
+        const messages: string[] = [];
+        const delimiter = '\u000110=';
+        let position = 0;
+        
+        while (true) {
+            const start = this.buffer.indexOf('8=FIX', position);
+            if (start === -1) break;
+            
+            const end = this.buffer.indexOf(delimiter, start);
+            if (end === -1) break;
+            
+            // Find the end of the checksum (3 more characters after the delimiter)
+            const checksumEnd = end + delimiter.length + 3;
+            if (checksumEnd > this.buffer.length) break;
+            
+            // Extract the complete message including the checksum
+            const message = this.buffer.substring(start, checksumEnd + 1);
+            messages.push(message);
+            
+            // Move position past this message
+            position = checksumEnd + 1;
+        }
+        
+        // Remove processed messages from the buffer
+        if (position > 0) {
+            this.buffer = this.buffer.substring(position);
+        }
+        
+        return messages;
     }
 
     private handleError(err: Error) {
@@ -552,9 +583,6 @@ class FixClient {
         // Try to reconnect on error
         if (isConnected) {
             isConnected = false;
-            if (heartbeatInterval) {
-                clearInterval(heartbeatInterval);
-            }
         }
         
         this.reconnect();
@@ -564,10 +592,6 @@ class FixClient {
         console.log('Connection closed', hadError ? 'due to error' : 'normally');
         isConnected = false;
         
-        if (heartbeatInterval) {
-            clearInterval(heartbeatInterval);
-        }
-
         // Try to reconnect on close
         this.reconnect();
     }
@@ -575,10 +599,6 @@ class FixClient {
     private handleEnd() {
         console.log('Connection ended');
         isConnected = false;
-        
-        if (heartbeatInterval) {
-            clearInterval(heartbeatInterval);
-        }
         
         // Try to reconnect on end
         this.reconnect();
@@ -631,13 +651,15 @@ class FixClient {
             if (pair.contractsize !== null) {
                 console.log(`Subscribing to market data for ${pair.currpair}`);
                 
-                // Create a Market Data Request message - simplified version
+                // Create a Market Data Request message with more complete fields
                 const marketDataRequest = createFixMessage({
                     35: 'V', // Market Data Request
-                    262: `MDR_${Date.now()}`, // MDReqID
+                    262: `MDR_${Date.now()}`, // MDReqID (unique ID)
                     263: '1', // SubscriptionRequestType (1 = Snapshot + Updates)
                     264: '0', // Market Depth (0 = Full book)
-                    267: '2', // NoMDEntryTypes
+                    265: '1', // MDUpdateType (1 = Full refresh)
+                    266: '1', // AggregatedBook (1 = Book is aggregated)
+                    267: '2', // NoMDEntryTypes (2 types: BID and ASK)
                     '269.1': '0', // MDEntryType - BID
                     '269.2': '1', // MDEntryType - ASK
                     146: '1', // NoRelatedSym
@@ -652,6 +674,12 @@ class FixClient {
                 subscribedPairs.add(pair.currpair);
                 
                 console.log(`Sent subscription request for ${pair.currpair}`);
+                
+                // Add a small delay between requests to prevent overwhelming the server
+                if (pairsToSubscribe.indexOf(pair) < pairsToSubscribe.length - 1) {
+                    console.log('Waiting before sending next subscription...');
+                    setTimeout(() => {}, 200);
+                }
             } else {
                 console.log(`Skipping subscription for ${pair.currpair} due to null contract size`);
             }
@@ -665,9 +693,6 @@ class FixClient {
             });
             this.client.write(logoutMessage);
             console.log('Logout message sent');
-        }
-        if (heartbeatInterval) {
-            clearInterval(heartbeatInterval);
         }
         this.client.end();
     }
