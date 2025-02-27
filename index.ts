@@ -311,12 +311,28 @@ const getContractSize = async (symbol: string): Promise<number> => {
         if (pairInfo && pairInfo.contractsize !== null) {
             return parseFloat(pairInfo.contractsize.toString());
         } else {
-            console.log(`Contract size not found for ${symbol}, using default 100000`);
-            return 100000; // Default contract size if not found
+            // Log this as a warning since we shouldn't be getting data for symbols we didn't subscribe to
+            // or for symbols with null contract size
+            console.warn(`⚠️ Warning: Received data for ${symbol} which has no contract size or wasn't subscribed`);
+            
+            // Try to get the contract size directly from the database as a fallback
+            try {
+                const result = await pgPool.query('SELECT contractsize FROM currpairdetails WHERE currpair = $1', [symbol]);
+                
+                if (result.rows.length > 0 && result.rows[0].contractsize !== null) {
+                    console.log(`Found contract size in database: ${result.rows[0].contractsize} for ${symbol}`);
+                    return parseFloat(result.rows[0].contractsize.toString());
+                }
+            } catch (dbError) {
+                console.error(`Database lookup for contract size failed:`, dbError);
+            }
+            
+            // If we can't find a valid contract size, we should not process this data
+            throw new Error(`Cannot process data for ${symbol}: No valid contract size found`);
         }
     } catch (error) {
         console.error(`Error getting contract size for ${symbol}:`, error);
-        return 100000; // Default in case of error
+        throw new Error(`Cannot process market data: ${error.message}`);
     }
 };
 
@@ -639,49 +655,42 @@ class FixClient {
         
         console.log('Subscribing to market data for currency pairs...');
         
-        // For debugging, let's subscribe to just one currency pair first
-        let pairsToSubscribe = availableCurrencyPairs;
-        if (pairsToSubscribe.length > 5) {
-            console.log('Debug mode: limiting subscription to first 5 pairs');
-            pairsToSubscribe = pairsToSubscribe.slice(0, 5);
-        }
+        // Get only pairs that are in the subscribedPairs set (already filtered for null contract size)
+        const pairsToSubscribe = availableCurrencyPairs.filter(pair => 
+            subscribedPairs.has(pair.currpair)
+        );
+        
+        console.log(`Found ${pairsToSubscribe.length} valid pairs to subscribe`);
         
         // For each currency pair with valid contract size
         for (const pair of pairsToSubscribe) {
-            if (pair.contractsize !== null) {
-                console.log(`Subscribing to market data for ${pair.currpair}`);
-                
-                // Create a Market Data Request message with more complete fields
-                const marketDataRequest = createFixMessage({
-                    35: 'V', // Market Data Request
-                    262: `MDR_${Date.now()}`, // MDReqID (unique ID)
-                    263: '1', // SubscriptionRequestType (1 = Snapshot + Updates)
-                    264: '0', // Market Depth (0 = Full book)
-                    265: '1', // MDUpdateType (1 = Full refresh)
-                    266: '1', // AggregatedBook (1 = Book is aggregated)
-                    267: '2', // NoMDEntryTypes (2 types: BID and ASK)
-                    '269.1': '0', // MDEntryType - BID
-                    '269.2': '1', // MDEntryType - ASK
-                    146: '1', // NoRelatedSym
-                    '55.1': pair.currpair // Symbol
-                });
-                
-                this.client.write(marketDataRequest);
-                const parsed = this.parseFixMessage(marketDataRequest);
-                this.logParsedMessage(parsed, 'Sent');
-                
-                // Add to subscribed pairs set
-                subscribedPairs.add(pair.currpair);
-                
-                console.log(`Sent subscription request for ${pair.currpair}`);
-                
-                // Add a small delay between requests to prevent overwhelming the server
-                if (pairsToSubscribe.indexOf(pair) < pairsToSubscribe.length - 1) {
-                    console.log('Waiting before sending next subscription...');
-                    setTimeout(() => {}, 200);
-                }
-            } else {
-                console.log(`Skipping subscription for ${pair.currpair} due to null contract size`);
+            console.log(`Subscribing to market data for ${pair.currpair} with contract size ${pair.contractsize}`);
+            
+            // Create a Market Data Request message with more complete fields
+            const marketDataRequest = createFixMessage({
+                35: 'V', // Market Data Request
+                262: `MDR_${Date.now()}`, // MDReqID (unique ID)
+                263: '1', // SubscriptionRequestType (1 = Snapshot + Updates)
+                264: '0', // Market Depth (0 = Full book)
+                265: '1', // MDUpdateType (1 = Full refresh)
+                266: '1', // AggregatedBook (1 = Book is aggregated)
+                267: '2', // NoMDEntryTypes (2 types: BID and ASK)
+                '269.1': '0', // MDEntryType - BID
+                '269.2': '1', // MDEntryType - ASK
+                146: '1', // NoRelatedSym
+                '55.1': pair.currpair // Symbol
+            });
+            
+            this.client.write(marketDataRequest);
+            const parsed = this.parseFixMessage(marketDataRequest);
+            this.logParsedMessage(parsed, 'Sent');
+            
+            console.log(`Sent subscription request for ${pair.currpair}`);
+            
+            // Add a small delay between requests to prevent overwhelming the server
+            if (pairsToSubscribe.indexOf(pair) < pairsToSubscribe.length - 1) {
+                console.log('Waiting before sending next subscription...');
+                setTimeout(() => {}, 200);
             }
         }
     }
