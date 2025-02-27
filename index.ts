@@ -120,23 +120,6 @@ let availableCurrencyPairs: CurrencyPairInfo[] = [];
 // Track subscribed currency pairs
 const subscribedPairs: Set<string> = new Set();
 
-// Commented out hardcoded approach and using database approach instead
-// const addHardcodedCurrencyPairs = () => {
-//     // Adding hardcoded currency pairs with contract sizes
-//     availableCurrencyPairs = [
-//         { currpair: 'EURUSD', contractsize: 100000 },
-//         { currpair: 'AAVUSD', contractsize: 100000 }, // Added AAVUSD for testing
-//     ];
-//     
-//     // Add to subscribed pairs
-//     availableCurrencyPairs.forEach(pair => {
-//         subscribedPairs.add(pair.currpair);
-//     });
-//     
-//     console.log('Added hardcoded currency pairs:', availableCurrencyPairs);
-//     console.log('Subscribed pairs:', Array.from(subscribedPairs));
-// };
-
 const initDatabase = async () => {
     try {
         // Fetch from database instead of using hardcoded pairs
@@ -437,9 +420,6 @@ class FixClient {
         console.log('='.repeat(80) + '\n');
     }
 
-    // This method is commented out as we're using real FIX data now
-    // public addHardcodedSampleDataToQueue() { ... }
-
     private handleConnect() {
         console.log('Connected to FIX server');
         isConnected = true;
@@ -459,7 +439,8 @@ class FixClient {
         console.log('Logon sent');
         this.logParsedMessage(parsed, 'Sent');
 
-        // Setup heartbeat
+        // Comment out heartbeat setup
+        /* 
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         heartbeatInterval = setInterval(() => {
             if (this.client.writable) {
@@ -468,6 +449,7 @@ class FixClient {
                 console.log('Heartbeat sent');
             }
         }, 25000);
+        */
         
         // Subscribe to market data after successful login
         setTimeout(() => {
@@ -481,7 +463,8 @@ class FixClient {
         const parsed = this.parseFixMessage(message);
         this.logParsedMessage(parsed, 'Received');
 
-        // Handle specific message types
+        // Comment out test request handling
+        /*
         if (parsed.messageType === 'Test Request' && parsed.testReqId) {
             const heartbeat = createFixMessage({
                 35: '0',
@@ -490,66 +473,67 @@ class FixClient {
             this.client.write(heartbeat);
             const parsedResponse = this.parseFixMessage(heartbeat);
             this.logParsedMessage(parsedResponse, 'Sent');
-        } else if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
+        } else 
+        */
+        
+        // Process market data messages
+        if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
             console.log('Received market data response!');
             
-            // Uncommented the real market data processing code
-            if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
-                try {
-                    // Extract market data entries
-                    const noMDEntries = parseInt(parsed.additionalFields['268'] || '0');
-                    const symbol = parsed.additionalFields['55'] || '';
+            try {
+                // Extract market data entries
+                const noMDEntries = parseInt(parsed.additionalFields['268'] || '0');
+                const symbol = parsed.additionalFields['55'] || '';
+                
+                if (noMDEntries > 0 && symbol && subscribedPairs.has(symbol)) {
+                    console.log(`Processing ${noMDEntries} market data entries for ${symbol}`);
                     
-                    if (noMDEntries > 0 && symbol && subscribedPairs.has(symbol)) {
-                        console.log(`Processing ${noMDEntries} market data entries for ${symbol}`);
+                    // Process each entry
+                    for (let i = 1; i <= noMDEntries; i++) {
+                        const typeTag = `269.${i}`;
+                        const priceTag = `270.${i}`;
+                        const sizeTag = `271.${i}`;
+                        const timeTag = `273.${i}`;
                         
-                        // Process each entry
-                        for (let i = 1; i <= noMDEntries; i++) {
-                            const typeTag = `269.${i}`;
-                            const priceTag = `270.${i}`;
-                            const sizeTag = `271.${i}`;
-                            const timeTag = `273.${i}`;
+                        if (parsed.additionalFields[typeTag] && parsed.additionalFields[priceTag]) {
+                            const entryType = parsed.additionalFields[typeTag];
+                            const price = parseFloat(parsed.additionalFields[priceTag]);
+                            const size = parseInt(parsed.additionalFields[sizeTag] || '0');
+                            const time = parsed.additionalFields[timeTag] || '';
                             
-                            if (parsed.additionalFields[typeTag] && parsed.additionalFields[priceTag]) {
-                                const entryType = parsed.additionalFields[typeTag];
-                                const price = parseFloat(parsed.additionalFields[priceTag]);
-                                const size = parseInt(parsed.additionalFields[sizeTag] || '0');
-                                const time = parsed.additionalFields[timeTag] || '';
+                            if (['0', '1'].includes(entryType)) { // BID or ASK
+                                const type = MD_ENTRY_TYPES[entryType];
                                 
-                                if (['0', '1'].includes(entryType)) { // BID or ASK
-                                    const type = MD_ENTRY_TYPES[entryType];
-                                    
-                                    // Create market data message and add to queue
-                                    const marketData: MarketDataMessage = {
-                                        symbol,
-                                        type: type as 'BID' | 'ASK',
-                                        price,
-                                        quantity: size,
-                                        timestamp: new Date().toISOString(),
-                                        rawData: {
-                                            '55': symbol,
-                                            '262': parsed.additionalFields['262'] || '',
-                                            '268': parsed.additionalFields['268'] || '',
-                                            '269': entryType,
-                                            '270': price.toString(),
-                                            '271': size.toString(),
-                                            '273': time
-                                        }
-                                    };
-                                    
-                                    // Add to Bull queue
-                                    marketDataQueue.add(marketData, { 
-                                        jobId: `${symbol}_${type}_${Date.now()}` 
-                                    });
-                                    
-                                    console.log(`Added ${type} data for ${symbol} to queue: ${price}`);
-                                }
+                                // Create market data message and add to queue
+                                const marketData: MarketDataMessage = {
+                                    symbol,
+                                    type: type as 'BID' | 'ASK',
+                                    price,
+                                    quantity: size,
+                                    timestamp: new Date().toISOString(),
+                                    rawData: {
+                                        '55': symbol,
+                                        '262': parsed.additionalFields['262'] || '',
+                                        '268': parsed.additionalFields['268'] || '',
+                                        '269': entryType,
+                                        '270': price.toString(),
+                                        '271': size.toString(),
+                                        '273': time
+                                    }
+                                };
+                                
+                                // Add to Bull queue
+                                marketDataQueue.add(marketData, { 
+                                    jobId: `${symbol}_${type}_${Date.now()}` 
+                                });
+                                
+                                console.log(`Added ${type} data for ${symbol} to queue: ${price}`);
                             }
                         }
                     }
-                } catch (error) {
-                    console.error('Error processing market data:', error);
                 }
+            } catch (error) {
+                console.error('Error processing market data:', error);
             }
         } else if (parsed.messageType === 'Reject') {
             console.log('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
@@ -621,7 +605,6 @@ class FixClient {
         }
     }
 
-    // Uncommented the market data subscription functionality
     public subscribeToMarketData() {
         if (!isConnected) {
             console.log('Not connected to FIX server. Cannot subscribe to market data.');
