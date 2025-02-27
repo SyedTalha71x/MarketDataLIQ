@@ -1,0 +1,380 @@
+import { Socket } from 'net';
+import { configDotenv } from 'dotenv';
+
+configDotenv();
+
+const FIX_SERVER = process.env.FIX_SERVER;
+const FIX_PORT = process.env.FIX_PORT;
+const SENDER_COMP_ID = process.env.SENDER_COMP_ID;
+const TARGET_COMP_ID = process.env.TARGET_COMP_ID;
+const USERNAME = process.env.USERNAME;
+const PASSWORD = process.env.PASSWORD;
+
+if (!FIX_SERVER || !FIX_PORT || !SENDER_COMP_ID || !TARGET_COMP_ID || !USERNAME || !PASSWORD) {
+    throw new Error('One or more required environment variables are missing.');
+}
+
+let sequenceNumber = 0;
+let heartbeatInterval: NodeJS.Timeout;
+let isConnected = false;
+let reconnectTimeout: NodeJS.Timeout;
+
+const MESSAGE_TYPES: Record<string, string> = {
+    '0': 'Heartbeat',
+    '1': 'Test Request',
+    '2': 'Resend Request',
+    '3': 'Reject',
+    '4': 'Sequence Reset',
+    '5': 'Logout',
+    'A': 'Logon',
+    'V': 'Market Data Request',
+    'W': 'Market Data Snapshot',
+    'X': 'Market Data Incremental Refresh'
+};
+
+interface ParsedFixMessage {
+    messageType: string;
+    senderCompId: string;
+    targetCompId: string;
+    msgSeqNum: number;
+    sendingTime: string;
+    rawMessage: string;
+    testReqId?: string;
+    username?: string;
+    additionalFields: Record<string, string>;
+}
+
+const getUTCTimestamp = (): string => {
+    const now = new Date();
+    return `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCDate()).padStart(2, '0')}-${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:${String(now.getUTCSeconds()).padStart(2, '0')}.${String(now.getUTCMilliseconds()).padStart(3, '0')}`;
+};
+
+const calculateChecksum = (message: string): string => {
+    let sum = 0;
+    for (let i = 0; i < message.length; i++) {
+        sum += message.charCodeAt(i);
+    }
+    return (sum % 256).toString().padStart(3, '0');
+};
+
+const debugMessage = (message: string, label: string): void => {
+    console.log(`\n------ ${label} RAW MESSAGE ------`);
+    const bytes = [];
+    for (let i = 0; i < message.length; i++) {
+        const char = message.charAt(i);
+        const code = message.charCodeAt(i);
+        let display = char;
+        if (code === 1) {
+            display = '|'; // SOH character
+        }
+        bytes.push(`${display}(${code})`);
+    }
+    console.log(bytes.join(' '));
+    console.log('---------------------------\n');
+};
+
+const createFixMessage = (body: Record<number, string | number>): string => {
+    sequenceNumber += 1;
+    
+    const messageBody = [
+        `35=${body[35]}`,
+        `49=${SENDER_COMP_ID}`,
+        `56=${TARGET_COMP_ID}`,
+        `34=${sequenceNumber}`,
+        `52=${getUTCTimestamp()}`,
+        ...Object.entries(body)
+            .filter(([key]) => !['35'].includes(key))
+            .map(([key, value]) => `${key}=${value}`)
+    ].join('\u0001');
+
+    const bodyLength = messageBody.length + 1;
+    let fullMessage = `8=FIX.4.4\u00019=${bodyLength}\u0001${messageBody}`;
+    const checksum = calculateChecksum(fullMessage + '\u0001');
+    return `${fullMessage}\u000110=${checksum}\u0001`;
+};
+
+// Enhanced market data request with correct repeating group structure
+const createMarketDataRequest = (symbol: string, mdReqId: string): string => {
+    sequenceNumber += 1;
+    
+    const header = [
+        '8=FIX.4.4',
+        '35=V', // Market Data Request
+        `49=${SENDER_COMP_ID}`,
+        `56=${TARGET_COMP_ID}`,
+        `34=${sequenceNumber}`,
+        `52=${getUTCTimestamp()}`
+    ].join('\u0001');
+    
+    const body = [
+        `262=${mdReqId}`,    // MDReqID
+        '263=1',             // SubscriptionRequestType (Subscribe)
+        '264=1',             // Market Depth
+        '265=0',             // MDUpdateType (Full Refresh)
+        '266=Y',             // AggregatedBook (Yes)
+        '267=1'              // NoMDEntryTypes (1 entry type instead of 2)
+    ].join('\u0001');
+    
+    // MDEntryType group - only bid now
+    const entryTypes = [
+        '269=0'              // Bid only (0 = Bid, 1 = Ask)
+    ].join('\u0001');
+    
+    // Related Symbols group
+    const symbolGroup = [
+        '146=1',             // NoRelatedSym (1 symbol)
+        `55=${symbol}`       // Symbol
+    ].join('\u0001');
+    
+    // Combine all parts
+    let message = `${header}\u0001${body}\u0001${entryTypes}\u0001${symbolGroup}`;
+    
+    // Calculate body length (excluding header tags 8 and 9)
+    const bodyWithoutHeader = message.replace('8=FIX.4.4\u0001', '');
+    const bodyLength = bodyWithoutHeader.length;
+    
+    // Insert body length
+    message = `8=FIX.4.4\u00019=${bodyLength}\u0001${bodyWithoutHeader}`;
+    
+    // Add checksum
+    const checksum = calculateChecksum(message);
+    message = `${message}\u000110=${checksum}\u0001`;
+    
+    return message;
+};
+
+class FixClient {
+    private client!: Socket;
+    private reconnectAttempts: number = 0;
+    private readonly maxReconnectAttempts: number = 1000;
+    private readonly reconnectDelay: number = 5000;
+
+    constructor() {
+        this.initializeClient();
+    }
+
+    private initializeClient() {
+        this.client = new Socket();
+        this.client.setKeepAlive(true, 30000);
+        this.client.setNoDelay(true);
+        this.setupEventHandlers();
+    }
+
+    private setupEventHandlers() {
+        this.client.on('connect', this.handleConnect.bind(this));
+        this.client.on('data', this.handleData.bind(this));
+        this.client.on('error', this.handleError.bind(this));
+        this.client.on('close', this.handleClose.bind(this));
+        this.client.on('end', this.handleEnd.bind(this));
+    }
+
+    private parseFixMessage(message: string): ParsedFixMessage {
+        const fields = message.split('\u0001');
+        const fieldMap: Record<string, string> = {};
+        
+        // Parse all fields into key-value pairs
+        fields.forEach(field => {
+            const [key, value] = field.split('=');
+            if (key && value) {
+                fieldMap[key] = value;
+            }
+        });
+
+        // Extract common fields
+        const messageType = fieldMap['35'];
+        const readableType = MESSAGE_TYPES[messageType] || `Unknown (${messageType})`;
+
+        const parsed: ParsedFixMessage = {
+            messageType: readableType,
+            senderCompId: fieldMap['49'] || '',
+            targetCompId: fieldMap['56'] || '',
+            msgSeqNum: parseInt(fieldMap['34'] || '0'),
+            sendingTime: fieldMap['52'] || '',
+            rawMessage: message,
+            additionalFields: {}
+        };
+
+        // Add optional fields if present
+        if (fieldMap['112']) parsed.testReqId = fieldMap['112'];
+        if (fieldMap['553']) parsed.username = fieldMap['553'];
+
+        // Add any other fields to additionalFields
+        Object.entries(fieldMap).forEach(([key, value]) => {
+            if (!['8', '9', '35', '49', '56', '34', '52', '10', '112', '553'].includes(key)) {
+                parsed.additionalFields[key] = value;
+            }
+        });        
+
+        return parsed;
+    }
+
+    private logParsedMessage(parsed: ParsedFixMessage, direction: 'Sent' | 'Received') {
+        const timestamp = new Date().toISOString();
+        console.log('\n' + '='.repeat(80));
+        console.log(`${direction} at ${timestamp}`);
+        console.log('-'.repeat(80));
+        console.log(`Message Type: ${parsed.messageType}`);
+        console.log(`From: ${parsed.senderCompId}`);
+        console.log(`To: ${parsed.targetCompId}`);
+        console.log(`Sequence: ${parsed.msgSeqNum}`);
+        console.log(`Time: ${parsed.sendingTime}`);
+
+        if (parsed.testReqId) {
+            console.log(`Test Request ID: ${parsed.testReqId}`);
+        }
+
+        if (Object.keys(parsed.additionalFields).length > 0) {
+            console.log('\nAdditional Fields:');
+            Object.entries(parsed.additionalFields).forEach(([key, value]) => {
+                console.log(`  ${key}: ${value}`);
+            });
+        }
+        console.log('='.repeat(80) + '\n');
+    }
+
+    public sendMarketDataRequest(symbol: string): void {
+        if (!isConnected) {
+            console.log('Sorry cannot send the market data because the fix server is not connected');
+            return;
+        }
+
+        const mdReqId = `MDR_${Date.now()}`;
+        console.log(`Sending market data request for ${symbol} with ID ${mdReqId}`);
+        
+        const marketDataRequest = createMarketDataRequest(symbol, mdReqId);
+        
+        
+        this.client.write(marketDataRequest);
+        const parsed = this.parseFixMessage(marketDataRequest);
+        console.log('Market Data request sent for symbol', symbol);
+        this.logParsedMessage(parsed, 'Sent');
+    }
+
+    private handleConnect() {
+        console.log('Connected to FIX server');
+        isConnected = true;
+        this.reconnectAttempts = 0;
+
+        // Send Logon message
+        const logonMessage = createFixMessage({
+            35: 'A',
+            98: 0,
+            108: 30,
+            553: USERNAME || '',
+            554: PASSWORD || '',
+            141: 'Y'
+        });
+        
+        this.client.write(logonMessage);
+        const parsed = this.parseFixMessage(logonMessage);
+        console.log('Logon sent:', logonMessage.replace(/\u0001/g, "\\u0001"));
+        this.logParsedMessage(parsed, 'Sent');
+
+        // Setup heartbeat
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = setInterval(() => {
+            if (this.client.writable) {
+                const heartbeat = createFixMessage({ 35: '0' });
+                this.client.write(heartbeat);
+                console.log('Heartbeat sent');
+            }
+        }, 25000);
+    }
+
+    private handleData(data: Buffer) {
+        const message = data.toString();
+        
+        const parsed = this.parseFixMessage(message);
+        this.logParsedMessage(parsed, 'Received');
+
+        // Handle specific message types
+        if (parsed.messageType === 'Test Request' && parsed.testReqId) {
+            const heartbeat = createFixMessage({
+                35: '0',
+                112: parsed.testReqId
+            });
+            this.client.write(heartbeat);
+            const parsedResponse = this.parseFixMessage(heartbeat);
+            this.logParsedMessage(parsedResponse, 'Sent');
+        } else if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
+            console.log('Received market data response!');
+            // Process market data here
+        } else if (parsed.messageType === 'Reject') {
+            console.log('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
+        }
+    }
+
+    private handleError(err: Error) {
+        console.log('Socket error:', err.message);
+    }
+
+    private handleClose(hadError: boolean) {
+        console.log('Connection closed', hadError ? 'due to error' : 'normally');
+        isConnected = false;
+        
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+        }
+
+        this.reconnect();
+    }
+
+    private handleEnd() {
+        console.log('Connection ended');
+        this.reconnect();
+    }
+
+    private reconnect() {
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+        }
+
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            console.log(`Reconnecting... Attempt ${this.reconnectAttempts}`);
+            
+            reconnectTimeout = setTimeout(() => {
+                this.connect();
+            }, this.reconnectDelay);
+        }
+    }
+
+    public connect() {
+        if (!isConnected) {
+            console.log('Initiating connection...');
+            this.client.connect({
+                host: FIX_SERVER,
+                port: Number(FIX_PORT)
+            });
+        }
+    }
+
+    public disconnect() {
+        if (isConnected) {
+            const logoutMessage = createFixMessage({
+                35: '5' // Logout
+            });
+            this.client.write(logoutMessage);
+            console.log('Logout message sent');
+        }
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+        }
+        this.client.end();
+    }
+}
+
+const fixClient = new FixClient();
+fixClient.connect();
+
+setTimeout(() => {
+    fixClient.sendMarketDataRequest("EURUSD");
+}, 5000);
+
+
+
+process.on('SIGINT', () => {
+    console.log('Shutting down...');
+    fixClient.disconnect();
+    process.exit(0);
+});
