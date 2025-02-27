@@ -460,22 +460,12 @@ class FixClient {
     private handleData(data: Buffer) {
         const message = data.toString();
         
+        // Log the raw message for debugging
+        console.log('RAW MESSAGE RECEIVED:', message);
+        
         const parsed = this.parseFixMessage(message);
         this.logParsedMessage(parsed, 'Received');
-
-        // Comment out test request handling
-        /*
-        if (parsed.messageType === 'Test Request' && parsed.testReqId) {
-            const heartbeat = createFixMessage({
-                35: '0',
-                112: parsed.testReqId
-            });
-            this.client.write(heartbeat);
-            const parsedResponse = this.parseFixMessage(heartbeat);
-            this.logParsedMessage(parsedResponse, 'Sent');
-        } else 
-        */
-        
+    
         // Process market data messages
         if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
             console.log('Received market data response!');
@@ -485,7 +475,10 @@ class FixClient {
                 const noMDEntries = parseInt(parsed.additionalFields['268'] || '0');
                 const symbol = parsed.additionalFields['55'] || '';
                 
-                if (noMDEntries > 0 && symbol && subscribedPairs.has(symbol)) {
+                console.log(`Got market data for symbol: ${symbol}, entries: ${noMDEntries}`);
+                
+                if (noMDEntries > 0 && symbol) {
+                    // Remove the check for subscribedPairs.has(symbol) to process all incoming data
                     console.log(`Processing ${noMDEntries} market data entries for ${symbol}`);
                     
                     // Process each entry
@@ -495,6 +488,8 @@ class FixClient {
                         const sizeTag = `271.${i}`;
                         const timeTag = `273.${i}`;
                         
+                        console.log(`Entry ${i} - Type: ${parsed.additionalFields[typeTag]}, Price: ${parsed.additionalFields[priceTag]}`);
+                        
                         if (parsed.additionalFields[typeTag] && parsed.additionalFields[priceTag]) {
                             const entryType = parsed.additionalFields[typeTag];
                             const price = parseFloat(parsed.additionalFields[priceTag]);
@@ -503,6 +498,8 @@ class FixClient {
                             
                             if (['0', '1'].includes(entryType)) { // BID or ASK
                                 const type = MD_ENTRY_TYPES[entryType];
+                                
+                                console.log(`Found ${type} entry for ${symbol}: Price=${price}, Size=${size}`);
                                 
                                 // Create market data message and add to queue
                                 const marketData: MarketDataMessage = {
@@ -523,6 +520,7 @@ class FixClient {
                                 };
                                 
                                 // Add to Bull queue
+                                console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
                                 marketDataQueue.add(marketData, { 
                                     jobId: `${symbol}_${type}_${Date.now()}` 
                                 });
@@ -531,12 +529,20 @@ class FixClient {
                             }
                         }
                     }
+                } else {
+                    console.log(`No market data entries found for ${symbol || 'unknown symbol'}`);
                 }
             } catch (error) {
                 console.error('Error processing market data:', error);
             }
         } else if (parsed.messageType === 'Reject') {
-            console.log('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
+            console.error('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
+        } else if (parsed.messageType === 'Logon') {
+            console.log('Logon response received, authentication successful');
+            // Subscribe immediately after successful logon
+            this.subscribeToMarketData();
+        } else {
+            console.log(`Received message of type: ${parsed.messageType}`);
         }
     }
 
@@ -613,18 +619,24 @@ class FixClient {
         
         console.log('Subscribing to market data for currency pairs...');
         
+        // For debugging, let's subscribe to just one currency pair first
+        let pairsToSubscribe = availableCurrencyPairs;
+        if (pairsToSubscribe.length > 5) {
+            console.log('Debug mode: limiting subscription to first 5 pairs');
+            pairsToSubscribe = pairsToSubscribe.slice(0, 5);
+        }
+        
         // For each currency pair with valid contract size
-        for (const pair of availableCurrencyPairs) {
+        for (const pair of pairsToSubscribe) {
             if (pair.contractsize !== null) {
                 console.log(`Subscribing to market data for ${pair.currpair}`);
                 
-                // Create a Market Data Request message
+                // Create a Market Data Request message - simplified version
                 const marketDataRequest = createFixMessage({
                     35: 'V', // Market Data Request
                     262: `MDR_${Date.now()}`, // MDReqID
                     263: '1', // SubscriptionRequestType (1 = Snapshot + Updates)
                     264: '0', // Market Depth (0 = Full book)
-                    265: '1', // MDUpdateType (1 = Full refresh)
                     267: '2', // NoMDEntryTypes
                     '269.1': '0', // MDEntryType - BID
                     '269.2': '1', // MDEntryType - ASK
@@ -642,8 +654,6 @@ class FixClient {
                 console.log(`Sent subscription request for ${pair.currpair}`);
             } else {
                 console.log(`Skipping subscription for ${pair.currpair} due to null contract size`);
-                // If needed, add any failure handling logic here
-                console.error(`Subscription failed for ${pair.currpair}: Contract size is null`);
             }
         }
     }
