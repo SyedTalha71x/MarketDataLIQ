@@ -1,4 +1,4 @@
 node_modules/
 .env
 .DS_Store
-all-server-keys.pem
+*.pem
