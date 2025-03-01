@@ -4,9 +4,8 @@ const { Pool } = pkg;
 import Bull from 'bull';
 import { configDotenv } from 'dotenv';
 
-
 configDotenv();
-// FIX connection settings
+
 const FIX_SERVER = process.env.FIX_SERVER;
 const FIX_PORT = process.env.FIX_PORT;
 const SENDER_COMP_ID = process.env.SENDER_COMP_ID;
@@ -14,14 +13,12 @@ const TARGET_COMP_ID = process.env.TARGET_COMP_ID;
 const USERNAME = process.env.USERNAME;
 const PASSWORD = process.env.PASSWORD;
 
-// PostgreSQL connection settings
 const PG_HOST = process.env.PG_HOST;
 const PG_PORT = process.env.PG_PORT;
 const PG_USER = process.env.PG_USER;
 const PG_PASSWORD = process.env.PG_PASSWORD;
 const PG_DATABASE = process.env.PG_DATABASE;
 
-// Redis settings for Bull
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379');
 
@@ -33,7 +30,6 @@ let sequenceNumber = 0;
 let isConnected = false;
 let reconnectTimeout: NodeJS.Timeout | null = null;
 
-// Market data message interface
 interface MarketDataMessage {
     symbol: string;
     type: 'BID' | 'ASK';
@@ -59,7 +55,6 @@ const marketDataQueue = new Bull('marketData', {
     }
 });
 
-// FIX message types
 const MESSAGE_TYPES: Record<string, string> = {
     '0': 'Heartbeat',
     '1': 'Test Request',
@@ -98,7 +93,6 @@ interface ParsedFixMessage {
     additionalFields: Record<string, string>;
 }
 
-// Initialize PostgreSQL connection pool
 const pgPool = new Pool({
     host: PG_HOST,
     port: PG_PORT ? Number(PG_PORT) : 5432,
@@ -107,7 +101,6 @@ const pgPool = new Pool({
     database: PG_DATABASE
 });
 
-// Currency pair info with contract size
 interface CurrencyPairInfo {
     currpair: string;
     contractsize: number | null;
@@ -121,7 +114,6 @@ const subscribedPairs: Set<string> = new Set();
 
 const initDatabase = async () => {
     try {
-        // Fetch from database instead of using hardcoded pairs
         await fetchAllCurrencyPairs();
         
         console.log('Database tables initialized successfully');
@@ -130,7 +122,6 @@ const initDatabase = async () => {
     }
 };
 
-// Uncommented the real database fetch function
 const fetchAllCurrencyPairs = async () => {
     try {
         const result = await pgPool.query('SELECT currpair, contractsize FROM currpairdetails');
@@ -201,7 +192,6 @@ const createFixMessage = (body: Record<number, string | number>): string => {
 
 const ensureTableExists = async (tableName: string, type: 'BID' | 'ASK'): Promise<void> => {
     try {
-        // Modified to use more specific check for table existence
         const tableCheck = await pgPool.query(`
             SELECT EXISTS (
                 SELECT FROM information_schema.tables
@@ -260,7 +250,6 @@ marketDataQueue.process(async (job) => {
             tableName = `ticks_${symbolLower}_ask`;
         }
         
-        // Ensure the table exists before inserting data
         await ensureTableExists(tableName, data.type);
         
         const query = {
@@ -295,25 +284,21 @@ marketDataQueue.process(async (job) => {
 
 // Monitor queue events
 marketDataQueue.on('completed', (job, result) => {
-    console.log(`✅ Job ${job.id} completed: ${result.symbol} ${result.type}`);
+    console.log(`Job ${job.id} completed: ${result.symbol} ${result.type}`);
 });
 
 marketDataQueue.on('failed', (job, error) => {
-    console.error(`❌ Job ${job.id} failed:`, error);
+    console.error(` Job ${job.id} failed:`, error);
 });
 
-// Get contract size for a symbol
 const getContractSize = async (symbol: string): Promise<number> => {
     try {
-        // Find the currency pair in our database-loaded list
         const pairInfo = availableCurrencyPairs.find(pair => pair.currpair === symbol);
         
         if (pairInfo && pairInfo.contractsize !== null) {
             return parseFloat(pairInfo.contractsize.toString());
         } else {
-            // Log this as a warning since we shouldn't be getting data for symbols we didn't subscribe to
-            // or for symbols with null contract size
-            console.warn(`⚠️ Warning: Received data for ${symbol} which has no contract size or wasn't subscribed`);
+            console.warn(`Warning: Received data for ${symbol} which has no contract size or wasn't subscribed`);
             
             // Try to get the contract size directly from the database as a fallback
             try {
@@ -327,7 +312,6 @@ const getContractSize = async (symbol: string): Promise<number> => {
                 console.error(`Database lookup for contract size failed:`, dbError);
             }
             
-            // If we can't find a valid contract size, we should not process this data
             throw new Error(`Cannot process data for ${symbol}: No valid contract size found`);
         }
     } catch (error) {
@@ -336,7 +320,6 @@ const getContractSize = async (symbol: string): Promise<number> => {
     }
 };
 
-// Calculate lots based on quantity and contract size
 const calculateLots = (quantity: number, contractSize: number): number => {
     console.log(`Calculating lots: ${quantity} / ${contractSize} = ${Math.round(quantity / contractSize)}`);
     return Math.round(quantity / contractSize);
@@ -468,7 +451,6 @@ class FixClient {
         const messages = this.extractMessages();
         
         for (const message of messages) {
-            // Log the raw message for debugging
             console.log('RAW MESSAGE RECEIVED:', message);
             
             const parsed = this.parseFixMessage(message);
@@ -527,7 +509,6 @@ class FixClient {
                                         }
                                     };
                                     
-                                    // Add to Bull queue
                                     console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
                                     marketDataQueue.add(marketData, { 
                                         jobId: `${symbol}_${type}_${Date.now()}` 
@@ -553,7 +534,6 @@ class FixClient {
                 }, 1000);
             } else if (parsed.messageType === 'Heartbeat') {
                 console.log('Received heartbeat from server');
-                // Just log it, no action needed
             } else {
                 console.log(`Received message of type: ${parsed.messageType}`);
             }
@@ -712,16 +692,13 @@ const fixClient = new FixClient();
 // Connect to real FIX server
 fixClient.connect();
 
-// Listen for shutdown
 process.on('SIGINT', async () => {
     console.log('Shutting down...');
     fixClient.disconnect();
     
-    // Close Bull queue
     console.log('Closing Bull queue...');
     await marketDataQueue.close();
     
-    // Close database connection
     pgPool.end().then(() => {
         console.log('Database connection closed');
         process.exit(0);
