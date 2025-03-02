@@ -170,7 +170,7 @@ const calculateChecksum = (message: string): string => {
     return (sum % 256).toString().padStart(3, '0');
 };
 
-const createFixMessage = (body: Record<number, string | number>): string => {
+const createFixMessage = (body: Record<number | string, string | number>): string => {
     sequenceNumber += 1;
     
     const messageBody = [
@@ -184,7 +184,7 @@ const createFixMessage = (body: Record<number, string | number>): string => {
             .map(([key, value]) => `${key}=${value}`)
     ].join('\u0001');
 
-    const bodyLength = messageBody.length + 1;
+    const bodyLength = messageBody.length;
     let fullMessage = `8=FIX.4.4\u00019=${bodyLength}\u0001${messageBody}`;
     const checksum = calculateChecksum(fullMessage + '\u0001');
     return `${fullMessage}\u000110=${checksum}\u0001`;
@@ -646,26 +646,40 @@ class FixClient {
         for (const pair of pairsToSubscribe) {
             console.log(`Subscribing to market data for ${pair.currpair} with contract size ${pair.contractsize}`);
             
-            // Create a Market Data Request message with more complete fields
-            const marketDataRequest = createFixMessage({
-                35: 'V', // Market Data Request
-                262: `MDR_${Date.now()}`, // MDReqID (unique ID)
-                263: '1', // SubscriptionRequestType (1 = Snapshot + Updates)
-                264: '0', // Market Depth (0 = Full book)
-                265: '1', // MDUpdateType (1 = Full refresh)
-                266: '1', // AggregatedBook (1 = Book is aggregated)
-                267: '2', // NoMDEntryTypes (2 types: BID and ASK)
-                '269.1': '0', // MDEntryType - BID
-                '269.2': '1', // MDEntryType - ASK
-                146: '1', // NoRelatedSym
-                '55.1': pair.currpair // Symbol
-            });
+            // Construct the FIX message manually to handle repeating groups correctly
+            sequenceNumber++;
             
-            this.client.write(marketDataRequest);
-            const parsed = this.parseFixMessage(marketDataRequest);
-            this.logParsedMessage(parsed, 'Sent');
+            // Start with the basic message parts
+            const messageBody = [
+                '35=V',                           // Message Type (V = Market Data Request)
+                `49=${SENDER_COMP_ID}`,           // SenderCompID
+                `56=${TARGET_COMP_ID}`,           // TargetCompID
+                `34=${sequenceNumber}`,           // MsgSeqNum
+                `52=${getUTCTimestamp()}`,        // SendingTime
+                `262=MDR_${Date.now()}`,          // MDReqID (unique identifier)
+                '263=1',                          // SubscriptionRequestType (1 = Snapshot + Updates)
+                '264=0',                          // MarketDepth (0 = Full Book)
+                '267=2',                          // NoMDEntryTypes (2 types: BID and ASK)
+                '269=0',                          // First MDEntryType - BID
+                '269=1',                          // Second MDEntryType - ASK
+                '146=1',                          // NoRelatedSym (1 symbol)
+                `55=${pair.currpair}`             // Symbol
+            ].join('\u0001');
             
-            console.log(`Sent subscription request for ${pair.currpair}`);
+            // Calculate the body length and create the header
+            const bodyLength = messageBody.length;
+            let fullMessage = `8=FIX.4.4\u00019=${bodyLength}\u0001${messageBody}`;
+            
+            // Calculate the checksum and append it
+            const checksum = calculateChecksum(fullMessage + '\u0001');
+            fullMessage = `${fullMessage}\u000110=${checksum}\u0001`;
+            
+            // Send the message
+            this.client.write(fullMessage);
+            
+            // Log the sent message in a readable format for debugging
+            console.log(`Sent market data subscription request for ${pair.currpair}`);
+            console.log('Raw message sent:', fullMessage.replace(/\u0001/g, '|'));
             
             // Add a small delay between requests to prevent overwhelming the server
             if (pairsToSubscribe.indexOf(pair) < pairsToSubscribe.length - 1) {
