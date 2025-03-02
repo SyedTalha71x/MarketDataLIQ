@@ -443,102 +443,147 @@ class FixClient {
         // The subscription will be triggered in handleData when we receive a logon response
     }
 
-    private handleData(data: Buffer) {
-        // Append the new data to our buffer
-        this.buffer += data.toString();
+   // Replace your handleData method with this improved version that correctly processes repeating groups:
+
+private handleData(data: Buffer) {
+    // Append the new data to our buffer
+    this.buffer += data.toString();
+    
+    // Process any complete FIX messages in the buffer
+    const messages = this.extractMessages();
+    
+    for (const message of messages) {
+        console.log('RAW MESSAGE RECEIVED:', message);
         
-        // Process any complete FIX messages in the buffer
-        const messages = this.extractMessages();
-        
-        for (const message of messages) {
-            console.log('RAW MESSAGE RECEIVED:', message);
+        const parsed = this.parseFixMessage(message);
+        this.logParsedMessage(parsed, 'Received');
+    
+        // Process market data messages
+        if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
+            console.log('Received market data response!');
             
-            const parsed = this.parseFixMessage(message);
-            this.logParsedMessage(parsed, 'Received');
-        
-            // Process market data messages
-            if (parsed.messageType === 'Market Data Snapshot' || parsed.messageType === 'Market Data Incremental Refresh') {
-                console.log('Received market data response!');
+            try {
+                // Extract market data entries
+                const noMDEntries = parseInt(parsed.additionalFields['268'] || '0');
+                const symbol = parsed.additionalFields['55'] || '';
                 
-                try {
-                    // Extract market data entries
-                    const noMDEntries = parseInt(parsed.additionalFields['268'] || '0');
-                    const symbol = parsed.additionalFields['55'] || '';
+                console.log(`Got market data for symbol: ${symbol}, entries: ${noMDEntries}`);
+                
+                if (noMDEntries > 0 && symbol) {
+                    // Process all incoming data regardless of subscription status
+                    console.log(`Processing ${noMDEntries} market data entries for ${symbol}`);
                     
-                    console.log(`Got market data for symbol: ${symbol}, entries: ${noMDEntries}`);
+                    // Extract all fields directly from the raw message
+                    const rawFields = message.split('\u0001');
+                    const fieldMap: Record<string, string> = {};
                     
-                    if (noMDEntries > 0 && symbol) {
-                        // Process all incoming data regardless of subscription status
-                        console.log(`Processing ${noMDEntries} market data entries for ${symbol}`);
+                    rawFields.forEach(field => {
+                        const [tag, value] = field.split('=');
+                        if (tag && value) {
+                            fieldMap[tag] = value;
+                        }
+                    });
+                    
+                    // Find all repeating group entries in the original message
+                    const mdEntries: Array<Record<string, string>> = [];
+                    let currentEntry: Record<string, string> = {};
+                    let inEntry = false;
+                    
+                    // Process the fields in order
+                    for (const field of rawFields) {
+                        const [tag, value] = field.split('=');
+                        if (!tag || !value) continue;
                         
-                        // Process each entry
-                        for (let i = 1; i <= noMDEntries; i++) {
-                            const typeTag = `269.${i}`;
-                            const priceTag = `270.${i}`;
-                            const sizeTag = `271.${i}`;
-                            const timeTag = `273.${i}`;
-                            
-                            console.log(`Entry ${i} - Type: ${parsed.additionalFields[typeTag]}, Price: ${parsed.additionalFields[priceTag]}`);
-                            
-                            if (parsed.additionalFields[typeTag] && parsed.additionalFields[priceTag]) {
-                                const entryType = parsed.additionalFields[typeTag];
-                                const price = parseFloat(parsed.additionalFields[priceTag]);
-                                const size = parseInt(parsed.additionalFields[sizeTag] || '0');
-                                const time = parsed.additionalFields[timeTag] || '';
-                                
-                                if (['0', '1'].includes(entryType)) { // BID or ASK
-                                    const type = MD_ENTRY_TYPES[entryType];
-                                    
-                                    console.log(`Found ${type} entry for ${symbol}: Price=${price}, Size=${size}`);
-                                    
-                                    // Create market data message and add to queue
-                                    const marketData: MarketDataMessage = {
-                                        symbol,
-                                        type: type as 'BID' | 'ASK',
-                                        price,
-                                        quantity: size,
-                                        timestamp: new Date().toISOString(),
-                                        rawData: {
-                                            '55': symbol,
-                                            '262': parsed.additionalFields['262'] || '',
-                                            '268': parsed.additionalFields['268'] || '',
-                                            '269': entryType,
-                                            '270': price.toString(),
-                                            '271': size.toString(),
-                                            '273': time
-                                        }
-                                    };
-                                    
-                                    console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
-                                    marketDataQueue.add(marketData, { 
-                                        jobId: `${symbol}_${type}_${Date.now()}` 
-                                    });
-                                    
-                                    console.log(`Added ${type} data for ${symbol} to queue: ${price}`);
-                                }
+                        // Check if this is the beginning of a new entry (MDEntryType)
+                        if (tag === '269') {
+                            if (inEntry && Object.keys(currentEntry).length > 0) {
+                                // Save the previous entry
+                                mdEntries.push(currentEntry);
+                            }
+                            // Start a new entry
+                            currentEntry = {};
+                            inEntry = true;
+                        }
+                        
+                        // If we're in an entry, collect its fields
+                        if (inEntry) {
+                            if (['269', '270', '271', '273'].includes(tag)) {
+                                currentEntry[tag] = value;
                             }
                         }
-                    } else {
-                        console.log(`No market data entries found for ${symbol || 'unknown symbol'}`);
                     }
-                } catch (error) {
-                    console.error('Error processing market data:', error);
+                    
+                    // Add the last entry if it exists
+                    if (inEntry && Object.keys(currentEntry).length > 0) {
+                        mdEntries.push(currentEntry);
+                    }
+                    
+                    console.log(`Extracted ${mdEntries.length} market data entries`);
+                    
+                    // Process each entry
+                    for (let i = 0; i < mdEntries.length; i++) {
+                        const entry = mdEntries[i];
+                        console.log(`Entry ${i+1} - Type: ${entry['269']}, Price: ${entry['270']}, Size: ${entry['271']}`);
+                        
+                        if (entry['269'] && entry['270']) {
+                            const entryType = entry['269'];
+                            const price = parseFloat(entry['270']);
+                            const size = parseFloat(entry['271'] || '0');
+                            const time = entry['273'] || '';
+                            
+                            if (['0', '1'].includes(entryType)) { // BID or ASK
+                                const type = MD_ENTRY_TYPES[entryType];
+                                
+                                console.log(`Found ${type} entry for ${symbol}: Price=${price}, Size=${size}`);
+                                
+                                // Create market data message and add to queue
+                                const marketData: MarketDataMessage = {
+                                    symbol,
+                                    type: type as 'BID' | 'ASK',
+                                    price,
+                                    quantity: size,
+                                    timestamp: new Date().toISOString(),
+                                    rawData: {
+                                        '55': symbol,
+                                        '262': parsed.additionalFields['262'] || '',
+                                        '268': parsed.additionalFields['268'] || '',
+                                        '269': entryType,
+                                        '270': price.toString(),
+                                        '271': size.toString(),
+                                        '273': time
+                                    }
+                                };
+                                
+                                console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
+                                marketDataQueue.add(marketData, { 
+                                    jobId: `${symbol}_${type}_${Date.now()}` 
+                                });
+                                
+                                console.log(`Added ${type} data for ${symbol} to queue: ${price}`);
+                            }
+                        }
+                    }
+                } else {
+                    console.log(`No market data entries found for ${symbol || 'unknown symbol'}`);
                 }
-            } else if (parsed.messageType === 'Reject') {
-                console.error('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
-            } else if (parsed.messageType === 'Logon') {
-                console.log('Logon response received, authentication successful');
-                // Subscribe after successful logon with a small delay
-                setTimeout(() => {
-                    this.subscribeToMarketData();
-                }, 1000);
-            } else if (parsed.messageType === 'Heartbeat') {
-                console.log('Received heartbeat from server');
-            } else {
-                console.log(`Received message of type: ${parsed.messageType}`);
+            } catch (error) {
+                console.error('Error processing market data:', error);
             }
+        } else if (parsed.messageType === 'Reject') {
+            console.error('Request rejected by server:', parsed.additionalFields['58'] || 'Unknown reason');
+        } else if (parsed.messageType === 'Logon') {
+            console.log('Logon response received, authentication successful');
+            // Subscribe after successful logon with a small delay
+            setTimeout(() => {
+                this.subscribeToMarketData();
+            }, 1000);
+        } else if (parsed.messageType === 'Heartbeat') {
+            console.log('Received heartbeat from server');
+        } else {
+            console.log(`Received message of type: ${parsed.messageType}`);
         }
     }
+}
 
     // Extract complete FIX messages from the buffer
     private extractMessages(): string[] {
