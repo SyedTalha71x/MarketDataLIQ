@@ -314,7 +314,7 @@ marketDataQueue.process(5,async (job) => {
                     ticktime = EXCLUDED.ticktime,
                     price = EXCLUDED.price
             `,
-      values: [lots, ticktime.toISOString(), data.price],
+            values: [ticktime.toISOString(), lots, data.price]
     };
 
     console.log(`Executing query for ${tableName}:`, query.text);
