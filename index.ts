@@ -256,7 +256,7 @@ const ensureTableExists = async (
       await pgPool.query(`
                 CREATE TABLE ${tableName} (
                     lots INTEGER PRIMARY KEY,
-                    effdate TIMESTAMP WITH TIME ZONE NOT NULL,
+                    ticktime TIMESTAMP WITH TIME ZONE NOT NULL,
                     price NUMERIC NOT NULL
                 )
             `);
@@ -284,12 +284,12 @@ marketDataQueue.process(5,async (job) => {
     );
 
     // Format time from data.timestamp
-    let effdate = new Date();
+    let ticktime = new Date();
     if (data.rawData["273"]) {
       const timeStr = data.rawData["273"];
       const [hours, minutes, seconds] = timeStr.split(":").map(Number);
-      effdate = new Date();
-      effdate.setHours(hours, minutes, seconds);
+      ticktime = new Date();
+      ticktime.setHours(hours, minutes, seconds);
     }
 
     // Determine which table to use based on the type
@@ -307,14 +307,14 @@ marketDataQueue.process(5,async (job) => {
     const query = {
       text: `
                 INSERT INTO ${tableName} 
-                (lots, effdate, price)
+                (lots, ticktime, price)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (lots) 
                 DO UPDATE SET 
-                    effdate = EXCLUDED.effdate,
+                    ticktime = EXCLUDED.ticktime,
                     price = EXCLUDED.price
             `,
-      values: [lots, effdate.toISOString(), data.price],
+      values: [lots, ticktime.toISOString(), data.price],
     };
 
     console.log(`Executing query for ${tableName}:`, query.text);
