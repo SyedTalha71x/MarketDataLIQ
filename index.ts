@@ -255,8 +255,8 @@ const ensureTableExists = async (
 
       await pgPool.query(`
                 CREATE TABLE ${tableName} (
-                    lots INTEGER PRIMARY KEY,
                     ticktime TIMESTAMP WITH TIME ZONE NOT NULL,
+                    lots INTEGER PRIMARY KEY,
                     price NUMERIC NOT NULL
                 )
             `);
@@ -307,7 +307,7 @@ marketDataQueue.process(5,async (job) => {
     const query = {
       text: `
                 INSERT INTO ${tableName} 
-                (lots, ticktime, price)
+                (ticktime, lots, price)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (lots) 
                 DO UPDATE SET 
