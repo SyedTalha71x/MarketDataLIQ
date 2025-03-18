@@ -452,9 +452,14 @@ marketDataQueue.process(5,async (job) => {
     throw error; 
   }
 });
+// In the candleProcessingQueue.process function, modify the code to convert the timestamp string back to a Date object:
+
 candleProcessingQueue.process(async (job) => {
   const { tickData, timeFrames } = job.data;
-  const { symbol, price, timestamp } = tickData;
+  const { symbol, price, lots } = tickData;
+  
+  // Convert the timestamp string back to a Date object
+  const timestamp = new Date(tickData.timestamp);
   
   console.log(`Processing candle data for ${symbol} at ${timestamp}`);
   
@@ -473,10 +478,10 @@ candleProcessingQueue.process(async (job) => {
         text: `
           SELECT * FROM ${tableName}
           WHERE candlesize = $1
-          AND lots = 1
-          AND candletime = $2
+          AND lots = $2
+          AND candletime = $3
         `,
-        values: [timeframe, candleTime.toISOString()]
+        values: [timeframe, lots, candleTime.toISOString()]
       };
       
       const existingCandle = await pgPool.query(existingCandleQuery);
@@ -492,14 +497,15 @@ candleProcessingQueue.process(async (job) => {
                 low = LEAST(low, $2),
                 close = $3
             WHERE candlesize = $4
-            AND lots = 1
-            AND candletime = $5
+            AND lots = $5
+            AND candletime = $6
           `,
           values: [
             price,
             price,
             price,
             timeframe,
+            lots,
             candleTime.toISOString()
           ]
         };
@@ -515,7 +521,7 @@ candleProcessingQueue.process(async (job) => {
           `,
           values: [
             timeframe, 
-            1,          
+            lots,          
             candleTime.toISOString(),
             price,      // open
             price,      // high (same as open for new candle)
