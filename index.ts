@@ -35,6 +35,12 @@ if (
   );
 }
 
+const timeFrames = {
+  "M1": 60000,       // 1 minute (60000 ms)
+  "H1": 3600000,     // 1 hour (3600000 ms)
+  "D1": 86400000     // 1 day (86400000 ms)
+};
+
 let sequenceNumber = 0;
 let isConnected = false;
 let reconnectTimeout: NodeJS.Timeout | null = null;
@@ -46,6 +52,13 @@ interface MarketDataMessage {
   quantity: number;
   timestamp: string;
   rawData: Record<string, string>;
+}
+
+interface TickData {
+  symbol: string;
+  price: number;
+  timestamp: Date;
+  lots: number;
 }
 
 // Create Bull queue for market data processing
@@ -71,6 +84,28 @@ const marketDataQueue = new Bull("marketData", {
     maxStalledCount: 1, // Prevent jobs from being marked as stalled too quickly
   },
 });
+
+// Create Bull queue for candles processing
+const candleProcessingQueue = new Bull("candleProcessing", {
+  redis: {
+    host: REDIS_HOST,
+    port: REDIS_PORT,
+  },
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 1000,
+    },
+    removeOnComplete: true,
+    timeout: 30000,
+  },
+  limiter: {
+    max: 50, // Lower limit for candle processing as it's more resource-intensive
+    duration: 1000,
+  },
+});
+
 
 const MESSAGE_TYPES: Record<string, string> = {
   "0": "Heartbeat",
@@ -129,9 +164,83 @@ let availableCurrencyPairs: CurrencyPairInfo[] = [];
 // Track subscribed currency pairs
 const subscribedPairs: Set<string> = new Set();
 
+
+const ensureCandleTableExists = async (tableName: string): Promise<void> => {
+  try {
+    const tableCheck = await pgPool.query(
+      `
+      SELECT EXISTS (
+          SELECT FROM information_schema.tables
+          WHERE table_schema = 'public'
+          AND table_name = $1
+      )
+      `,
+      [tableName]
+    );
+
+    if (!tableCheck.rows[0].exists) {
+      console.log(`Table ${tableName} does not exist, creating it...`);
+
+      await pgPool.query(`
+        CREATE TABLE ${tableName} (
+            candlesize TEXT NOT NULL,
+            lots SMALLINT NOT NULL,
+            candletime TIMESTAMP WITH TIME ZONE NOT NULL,
+            open NUMERIC(12,5) NOT NULL,
+            high NUMERIC(12,5) NOT NULL,
+            low NUMERIC(12,5) NOT NULL,
+            close NUMERIC(12,5) NOT NULL,
+            PRIMARY KEY (candlesize, lots, candletime)
+        )
+      `);
+
+      console.log(`Created candle table ${tableName}`);
+    }
+  } catch (error) {
+    console.error(`Error ensuring candle table ${tableName} exists:`, error);
+    throw error;
+  }
+};
+
+const initCandleTables = async () => {
+  try {
+    const result = await pgPool.query("SELECT currpair FROM currpairdetails");
+    const allCurrencyPairs = result.rows;
+
+    console.log(`Initializing candle tables for ${allCurrencyPairs.length} currency pairs`);
+
+    for (const pair of allCurrencyPairs) {
+      const tableName = `candles_${pair.currpair.toLowerCase()}_bid`;
+      await ensureCandleTableExists(tableName);
+      console.log(`Candle table for ${pair.currpair} initialized`);
+    }
+  } catch (error) {
+    console.error("Error initializing candle tables:", error);
+  }
+};
+
+const processTickForCandles = async (tickData: TickData) => {
+  try {
+    // Add to candle processing queue
+    await candleProcessingQueue.add(
+      {
+        tickData,
+        timeFrames: Object.keys(timeFrames)
+      },
+      {
+        jobId: `candle_${tickData.symbol}_${Date.now()}`
+      }
+    );
+    console.log(`Added tick data for ${tickData.symbol} to candle processing queue`);
+  } catch (error) {
+    console.error("Error adding tick to candle processing queue:", error);
+  }
+};
+
 const initDatabase = async () => {
   try {
     await fetchAllCurrencyPairs();
+    await initCandleTables();
 
     console.log("Database tables initialized successfully");
   } catch (error) {
@@ -269,6 +378,9 @@ const ensureTableExists = async (
   }
 };
 
+
+
+
 // Set up Bull queue processor
 marketDataQueue.process(5,async (job) => {
   try {
@@ -325,19 +437,119 @@ marketDataQueue.process(5,async (job) => {
       `✓ Successfully saved ${data.type} data for ${data.symbol} to database in ${tableName}`
     );
 
+    if (data.type === "BID") {
+      await processTickForCandles({
+        symbol: data.symbol,
+        price: data.price,
+        timestamp: ticktime,
+        lots: lots
+      });
+    }
+
     return { success: true, symbol: data.symbol, type: data.type };
   } catch (error) {
     console.error(`Error processing market data job:`, error);
-    throw error; // Rethrowing to trigger Bull's retry mechanism
+    throw error; 
   }
 });
+candleProcessingQueue.process(async (job) => {
+  const { tickData, timeFrames } = job.data;
+  const { symbol, price, timestamp } = tickData;
+  
+  console.log(`Processing candle data for ${symbol} at ${timestamp}`);
+  
+  // For each timeframe (M1, H1, D1)
+  for (const timeframe of timeFrames) {
+    try {
+      // Calculate the candle time (start time of the candle)
+      const candleTimeMs = Math.floor(timestamp.getTime() / timeFrames[timeframe]) * timeFrames[timeframe];
+      const candleTime = new Date(candleTimeMs);
+      
+      console.log(`Processing ${timeframe} candle for ${symbol} at ${candleTime.toISOString()}`);
+      
+      const tableName = `candles_${symbol.toLowerCase()}_bid`;
+      
+      const existingCandleQuery = {
+        text: `
+          SELECT * FROM ${tableName}
+          WHERE candlesize = $1
+          AND lots = 1
+          AND candletime = $2
+        `,
+        values: [timeframe, candleTime.toISOString()]
+      };
+      
+      const existingCandle = await pgPool.query(existingCandleQuery);
+      
+      if (existingCandle.rows.length > 0) {
+        // Update existing candle
+        const currentCandle = existingCandle.rows[0];
+        
+        const updateQuery = {
+          text: `
+            UPDATE ${tableName}
+            SET high = GREATEST(high, $1),
+                low = LEAST(low, $2),
+                close = $3
+            WHERE candlesize = $4
+            AND lots = 1
+            AND candletime = $5
+          `,
+          values: [
+            price,
+            price,
+            price,
+            timeframe,
+            candleTime.toISOString()
+          ]
+        };
+        
+        await pgPool.query(updateQuery);
+        console.log(`Updated ${timeframe} candle for ${symbol}`);
+      } else {
+        const insertQuery = {
+          text: `
+            INSERT INTO ${tableName}
+            (candlesize, lots, candletime, open, high, low, close)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `,
+          values: [
+            timeframe, 
+            1,          
+            candleTime.toISOString(),
+            price,      // open
+            price,      // high (same as open for new candle)
+            price,      // low (same as open for new candle)
+            price       // close (same as open for new candle)
+          ]
+        };
+        
+        await pgPool.query(insertQuery);
+        console.log(`Created new ${timeframe} candle for ${symbol}`);
+      }
+    } catch (error) {
+      console.error(`Error processing ${timeframe} candle for ${symbol}:`, error);
+      throw error;
+    }
+  }
+  
+  return { success: true, symbol };
+});
 
-// Monitor queue events
+
 marketDataQueue.on("completed", (job, result) => {
   console.log(`Job ${job.id} completed: ${result.symbol} ${result.type}`);
 });
 
 marketDataQueue.on("failed", (job, error) => {
+  console.error(` Job ${job.id} failed:`, error);
+});
+
+candleProcessingQueue.on("completed", (job, result)=>{
+  console.log(`job ${job.id} completed: ${result.symbol}`);
+})
+
+candleProcessingQueue.on("failed", (job, error) => {
   console.error(` Job ${job.id} failed:`, error);
 });
 
@@ -847,6 +1059,8 @@ process.on("SIGINT", async () => {
 
   console.log("Closing Bull queue...");
   await marketDataQueue.close();
+  await candleProcessingQueue.close();
+
 
   pgPool.end().then(() => {
     console.log("Database connection closed");
