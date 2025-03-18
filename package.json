@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node dist/main.js",
-    "dev": "nodemon --exec node --loader ts-node/esm main.ts --signal SIGKILL",
+    "start": "node dist/index.js",
+    "fix": "ts-node ./src/FixClient.ts",
+    "market":"ts-node ./src/MarketData.ts",
+"dev": "nodemon --exec node --loader ts-node/esm index.ts --signal SIGKILL",
 
     "build": "tsc"
   },
