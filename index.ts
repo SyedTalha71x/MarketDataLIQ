@@ -466,15 +466,17 @@ candleProcessingQueue.process(async (job) => {
 
   console.log(`Processing candle data for ${symbol} at ${timestamp.toISOString()}`);
 
-  // Default timeFrames if not provided
+  // Default timeFrames if not provided or invalid
   const defaultTimeFrames = {
     M1: 60000,    // 1 minute in milliseconds
     H1: 3600000,  // 1 hour in milliseconds
     D1: 86400000, // 1 day in milliseconds
   };
 
-  // Use provided timeFrames or default if not provided
-  const resolvedTimeFrames = timeFrames || defaultTimeFrames;
+  // Ensure timeFrames is an object with valid values
+  const resolvedTimeFrames = typeof timeFrames === 'object' && !Array.isArray(timeFrames)
+    ? timeFrames
+    : defaultTimeFrames;
 
   // Log the resolved timeFrames for debugging
   console.log("Resolved timeFrames:", resolvedTimeFrames);
@@ -482,16 +484,18 @@ candleProcessingQueue.process(async (job) => {
   // For each timeframe (M1, H1, D1)
   for (const timeframe of Object.keys(resolvedTimeFrames)) {
     try {
-      // Ensure the timeframe exists in the resolvedTimeFrames object
-      if (!resolvedTimeFrames[timeframe]) {
-        console.error(`Invalid timeframe: ${timeframe}`);
+      const timeframeDuration = resolvedTimeFrames[timeframe];
+
+      // Ensure the timeframe duration is valid
+      if (typeof timeframeDuration !== 'number' || isNaN(timeframeDuration)) {
+        console.error(`Invalid duration for timeframe ${timeframe}:`, timeframeDuration);
         continue;
       }
 
       // Calculate the candle time (start time of the candle)
       const candleTimeMs =
-        Math.floor(timestamp.getTime() / resolvedTimeFrames[timeframe]) *
-        resolvedTimeFrames[timeframe];
+        Math.floor(timestamp.getTime() / timeframeDuration) *
+        timeframeDuration;
 
       // Log the calculated candleTimeMs for debugging
       console.log(`candleTimeMs for ${timeframe}:`, candleTimeMs);
