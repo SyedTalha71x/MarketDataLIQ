@@ -36,9 +36,9 @@ if (
 }
 
 const timeFrames = {
-  "M1": 60000,       // 1 minute (60000 ms)
-  "H1": 3600000,     // 1 hour (3600000 ms)
-  "D1": 86400000     // 1 day (86400000 ms)
+  M1: 60000, // 1 minute (60000 ms)
+  H1: 3600000, // 1 hour (3600000 ms)
+  D1: 86400000, // 1 day (86400000 ms)
 };
 
 let sequenceNumber = 0;
@@ -106,7 +106,6 @@ const candleProcessingQueue = new Bull("candleProcessing", {
   },
 });
 
-
 const MESSAGE_TYPES: Record<string, string> = {
   "0": "Heartbeat",
   "1": "Test Request",
@@ -164,7 +163,6 @@ let availableCurrencyPairs: CurrencyPairInfo[] = [];
 // Track subscribed currency pairs
 const subscribedPairs: Set<string> = new Set();
 
-
 const ensureCandleTableExists = async (tableName: string): Promise<void> => {
   try {
     const tableCheck = await pgPool.query(
@@ -207,7 +205,9 @@ const initCandleTables = async () => {
     const result = await pgPool.query("SELECT currpair FROM currpairdetails");
     const allCurrencyPairs = result.rows;
 
-    console.log(`Initializing candle tables for ${allCurrencyPairs.length} currency pairs`);
+    console.log(
+      `Initializing candle tables for ${allCurrencyPairs.length} currency pairs`
+    );
 
     for (const pair of allCurrencyPairs) {
       const tableName = `candles_${pair.currpair.toLowerCase()}_bid`;
@@ -225,13 +225,15 @@ const processTickForCandles = async (tickData: TickData) => {
     await candleProcessingQueue.add(
       {
         tickData,
-        timeFrames: Object.keys(timeFrames)
+        timeFrames: Object.keys(timeFrames),
       },
       {
-        jobId: `candle_${tickData.symbol}_${Date.now()}`
+        jobId: `candle_${tickData.symbol}_${Date.now()}`,
       }
     );
-    console.log(`Added tick data for ${tickData.symbol} to candle processing queue`);
+    console.log(
+      `Added tick data for ${tickData.symbol} to candle processing queue`
+    );
   } catch (error) {
     console.error("Error adding tick to candle processing queue:", error);
   }
@@ -378,11 +380,8 @@ const ensureTableExists = async (
   }
 };
 
-
-
-
 // Set up Bull queue processor
-marketDataQueue.process(5,async (job) => {
+marketDataQueue.process(5, async (job) => {
   try {
     const data: MarketDataMessage = job.data;
     console.log(`Processing market data job for ${data.symbol} (${data.type})`);
@@ -426,7 +425,7 @@ marketDataQueue.process(5,async (job) => {
                     ticktime = EXCLUDED.ticktime,
                     price = EXCLUDED.price
             `,
-            values: [ticktime.toISOString(), lots, data.price]
+      values: [ticktime.toISOString(), lots, data.price],
     };
 
     console.log(`Executing query for ${tableName}:`, query.text);
@@ -442,38 +441,58 @@ marketDataQueue.process(5,async (job) => {
         symbol: data.symbol,
         price: data.price,
         timestamp: ticktime,
-        lots: lots
+        lots: lots,
       });
     }
 
     return { success: true, symbol: data.symbol, type: data.type };
   } catch (error) {
     console.error(`Error processing market data job:`, error);
-    throw error; 
+    throw error;
   }
 });
-// In the candleProcessingQueue.process function, modify the code to convert the timestamp string back to a Date object:
-
 candleProcessingQueue.process(async (job) => {
   const { tickData, timeFrames } = job.data;
   const { symbol, price, lots } = tickData;
-  
+
   // Convert the timestamp string back to a Date object
   const timestamp = new Date(tickData.timestamp);
-  
+
+  // Check if the timestamp is valid
+  if (isNaN(timestamp.getTime())) {
+    console.error(`Invalid timestamp for ${symbol}: ${tickData.timestamp}`);
+    throw new Error(`Invalid timestamp for ${symbol}`);
+  }
+
   console.log(`Processing candle data for ${symbol} at ${timestamp}`);
-  
+
   // For each timeframe (M1, H1, D1)
   for (const timeframe of timeFrames) {
     try {
+      // Ensure the timeframe exists in the timeFrames object
+      if (!timeFrames[timeframe]) {
+        console.error(`Invalid timeframe: ${timeframe}`);
+        continue;
+      }
+
       // Calculate the candle time (start time of the candle)
-      const candleTimeMs = Math.floor(timestamp.getTime() / timeFrames[timeframe]) * timeFrames[timeframe];
+      const candleTimeMs =
+        Math.floor(timestamp.getTime() / timeFrames[timeframe]) *
+        timeFrames[timeframe];
       const candleTime = new Date(candleTimeMs);
-      
-      console.log(`Processing ${timeframe} candle for ${symbol} at ${candleTime.toISOString()}`);
-      
+
+      // Check if the candleTime is valid
+      if (isNaN(candleTime.getTime())) {
+        console.error(`Invalid candle time for ${symbol} and timeframe ${timeframe}`);
+        continue;
+      }
+
+      console.log(
+        `Processing ${timeframe} candle for ${symbol} at ${candleTime.toISOString()}`
+      );
+
       const tableName = `candles_${symbol.toLowerCase()}_bid`;
-      
+
       const existingCandleQuery = {
         text: `
           SELECT * FROM ${tableName}
@@ -481,15 +500,15 @@ candleProcessingQueue.process(async (job) => {
           AND lots = $2
           AND candletime = $3
         `,
-        values: [timeframe, lots, candleTime.toISOString()]
+        values: [timeframe, lots, candleTime.toISOString()],
       };
-      
+
       const existingCandle = await pgPool.query(existingCandleQuery);
-      
+
       if (existingCandle.rows.length > 0) {
         // Update existing candle
         const currentCandle = existingCandle.rows[0];
-        
+
         const updateQuery = {
           text: `
             UPDATE ${tableName}
@@ -506,10 +525,10 @@ candleProcessingQueue.process(async (job) => {
             price,
             timeframe,
             lots,
-            candleTime.toISOString()
-          ]
+            candleTime.toISOString(),
+          ],
         };
-        
+
         await pgPool.query(updateQuery);
         console.log(`Updated ${timeframe} candle for ${symbol}`);
       } else {
@@ -520,28 +539,30 @@ candleProcessingQueue.process(async (job) => {
             VALUES ($1, $2, $3, $4, $5, $6, $7)
           `,
           values: [
-            timeframe, 
-            lots,          
+            timeframe,
+            lots,
             candleTime.toISOString(),
-            price,      // open
-            price,      // high (same as open for new candle)
-            price,      // low (same as open for new candle)
-            price       // close (same as open for new candle)
-          ]
+            price, // open
+            price, // high (same as open for new candle)
+            price, // low (same as open for new candle)
+            price, // close (same as open for new candle)
+          ],
         };
-        
+
         await pgPool.query(insertQuery);
         console.log(`Created new ${timeframe} candle for ${symbol}`);
       }
     } catch (error) {
-      console.error(`Error processing ${timeframe} candle for ${symbol}:`, error);
+      console.error(
+        `Error processing ${timeframe} candle for ${symbol}:`,
+        error
+      );
       throw error;
     }
   }
-  
+
   return { success: true, symbol };
 });
-
 
 marketDataQueue.on("completed", (job, result) => {
   console.log(`Job ${job.id} completed: ${result.symbol} ${result.type}`);
@@ -551,9 +572,9 @@ marketDataQueue.on("failed", (job, error) => {
   console.error(` Job ${job.id} failed:`, error);
 });
 
-candleProcessingQueue.on("completed", (job, result)=>{
+candleProcessingQueue.on("completed", (job, result) => {
   console.log(`job ${job.id} completed: ${result.symbol}`);
-})
+});
 
 candleProcessingQueue.on("failed", (job, error) => {
   console.error(` Job ${job.id} failed:`, error);
@@ -733,7 +754,6 @@ class FixClient {
     // We'll wait for the logon response before subscribing
     // The subscription will be triggered in handleData when we receive a logon response
   }
-
 
   private handleData(data: Buffer) {
     // Append the new data to our buffer
@@ -1066,7 +1086,6 @@ process.on("SIGINT", async () => {
   console.log("Closing Bull queue...");
   await marketDataQueue.close();
   await candleProcessingQueue.close();
-
 
   pgPool.end().then(() => {
     console.log("Database connection closed");
