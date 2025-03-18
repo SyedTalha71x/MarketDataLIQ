@@ -464,26 +464,43 @@ candleProcessingQueue.process(async (job) => {
     throw new Error(`Invalid timestamp for ${symbol}`);
   }
 
-  console.log(`Processing candle data for ${symbol} at ${timestamp}`);
+  console.log(`Processing candle data for ${symbol} at ${timestamp.toISOString()}`);
+
+  // Default timeFrames if not provided
+  const defaultTimeFrames = {
+    M1: 60000,    // 1 minute in milliseconds
+    H1: 3600000,  // 1 hour in milliseconds
+    D1: 86400000, // 1 day in milliseconds
+  };
+
+  // Use provided timeFrames or default if not provided
+  const resolvedTimeFrames = timeFrames || defaultTimeFrames;
+
+  // Log the resolved timeFrames for debugging
+  console.log("Resolved timeFrames:", resolvedTimeFrames);
 
   // For each timeframe (M1, H1, D1)
-  for (const timeframe of timeFrames) {
+  for (const timeframe of Object.keys(resolvedTimeFrames)) {
     try {
-      // Ensure the timeframe exists in the timeFrames object
-      if (!timeFrames[timeframe]) {
+      // Ensure the timeframe exists in the resolvedTimeFrames object
+      if (!resolvedTimeFrames[timeframe]) {
         console.error(`Invalid timeframe: ${timeframe}`);
         continue;
       }
 
       // Calculate the candle time (start time of the candle)
       const candleTimeMs =
-        Math.floor(timestamp.getTime() / timeFrames[timeframe]) *
-        timeFrames[timeframe];
+        Math.floor(timestamp.getTime() / resolvedTimeFrames[timeframe]) *
+        resolvedTimeFrames[timeframe];
+
+      // Log the calculated candleTimeMs for debugging
+      console.log(`candleTimeMs for ${timeframe}:`, candleTimeMs);
+
       const candleTime = new Date(candleTimeMs);
 
       // Check if the candleTime is valid
       if (isNaN(candleTime.getTime())) {
-        console.error(`Invalid candle time for ${symbol} and timeframe ${timeframe}`);
+        console.error(`Invalid candleTime for ${symbol} and timeframe ${timeframe}`);
         continue;
       }
 
