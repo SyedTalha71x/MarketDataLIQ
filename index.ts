@@ -453,7 +453,9 @@ marketDataQueue.process(5, async (job) => {
 });
 candleProcessingQueue.process(async (job) => {
   const { tickData, timeFrames } = job.data;
-  const { symbol, price, lots } = tickData;
+  const { symbol, price } = tickData;
+
+  const lots = 1;
 
   // Convert the timestamp string back to a Date object
   const timestamp = new Date(tickData.timestamp);
