@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node dist/index.js",
-    "dev": "nodemon --exec node --loader ts-node index.ts --signal SIGKILL",
+    "dev": "nodemon --exec ts-node index.ts --signal SIGKILL",
     "build": "tsc"
   },
   "type": "module",
@@ -22,10 +22,10 @@
   },
   "devDependencies": {
     "@types/chalk": "^0.4.31",
-    "@types/node": "^22.13.4",
+    "@types/node": "^22.13.10",
     "@types/pg": "^8.11.11",
     "@types/ws": "^8.18.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.8.2"
   }
 }
