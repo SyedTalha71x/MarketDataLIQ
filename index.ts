@@ -11,14 +11,29 @@ const SENDER_COMP_ID = process.env.SENDER_COMP_ID;
 const TARGET_COMP_ID = process.env.TARGET_COMP_ID;
 const USERNAME = process.env.USERNAME;
 const PASSWORD = process.env.PASSWORD;
+
 const PG_HOST = process.env.PG_HOST;
 const PG_PORT = process.env.PG_PORT;
 const PG_USER = process.env.PG_USER;
 const PG_PASSWORD = process.env.PG_PASSWORD;
 const PG_DATABASE = process.env.PG_DATABASE;
-const REDIS_HOST = process.env.REDIS_HOST;
-const REDIS_PORT = process.env.REDIS_PORT;
-const WS_PORT = process.env.WS_PORT
+
+const REDIS_HOST = process.env.REDIS_HOST || "localhost";
+const REDIS_PORT = parseInt(process.env.REDIS_PORT || "6379");
+const WS_PORT = process.env.WS_PORT || 8080;
+
+if (
+  !FIX_SERVER ||
+  !FIX_PORT ||
+  !SENDER_COMP_ID ||
+  !TARGET_COMP_ID ||
+  !USERNAME ||
+  !PASSWORD
+) {
+  console.log(
+    "One or more required environment variables are missing, using sample mode."
+  );
+}
 
 
 const wss = new WebSocketServer({ port: Number(WS_PORT) || 8080 });
