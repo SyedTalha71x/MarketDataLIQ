@@ -4,38 +4,26 @@ import pkg from "pg";
 const { Pool } = pkg;
 import Bull from "bull";
 import { configDotenv } from "dotenv";
-import { MESSAGE_TYPES, MD_ENTRY_TYPES } from "./config.ts";
-import {
-  FIX_SERVER,
-  FIX_PORT,
-  SENDER_COMP_ID,
-  TARGET_COMP_ID,
-  USERNAME,
-  PASSWORD,
-  PG_HOST,
-  PG_PORT,
-  PG_USER,
-  PG_PASSWORD,
-  PG_DATABASE,
-  REDIS_HOST,
-  REDIS_PORT,
-  WS_PORT,
-} from "./config.ts";
-import {
-  CurrencyPairInfo,
-  MarketDataMessage,
-  ParsedFixMessage,
-  WebSocketClient,
-} from "./src/utils/interfaces.ts";
-import {
-  getUTCTimestamp,
-  calculateChecksum,
-  calculateLots,
-} from "./src/utils/helpers.ts";
+
+const FIX_SERVER = process.env.FIX_SERVER;
+const FIX_PORT = process.env.FIX_PORT;
+const SENDER_COMP_ID = process.env.SENDER_COMP_ID;
+const TARGET_COMP_ID = process.env.TARGET_COMP_ID;
+const USERNAME = process.env.USERNAME;
+const PASSWORD = process.env.PASSWORD;
+const PG_HOST = process.env.PG_HOST;
+const PG_PORT = process.env.PG_PORT;
+const PG_USER = process.env.PG_USER;
+const PG_PASSWORD = process.env.PG_PASSWORD;
+const PG_DATABASE = process.env.PG_DATABASE;
+const REDIS_HOST = process.env.REDIS_HOST;
+const REDIS_PORT = process.env.REDIS_PORT;
+const WS_PORT = process.env.WS_PORT
+
 
 configDotenv();
 
-const wss = new WebSocketServer({ port: WS_PORT || 8080 });
+const wss = new WebSocketServer({ port: Number(WS_PORT) || 8080 });
 console.log(`WebSocket server is running on ws://localhost:${WS_PORT || 8080}`);
 
 // Track all connected WebSocket clients (no subscription data needed)
@@ -53,6 +41,78 @@ if (
     "One or more required environment variables are missing, using sample mode."
   );
 }
+
+
+const timeFrames = {
+  M1: 60000, // 1 minute (60000 ms)
+  H1: 3600000, // 1 hour (3600000 ms)
+  D1: 86400000, // 1 day (86400000 ms)
+};
+
+const MESSAGE_TYPES: Record<string, string> = {
+  "0": "Heartbeat",
+  "1": "Test Request",
+  "2": "Resend Request",
+  "3": "Reject",
+  "4": "Sequence Reset",
+  "5": "Logout",
+  A: "Logon",
+  V: "Market Data Request",
+  W: "Market Data Snapshot",
+  X: "Market Data Incremental Refresh",
+};
+
+const MD_ENTRY_TYPES: Record<string, string> = {
+  "0": "BID",
+  "1": "ASK",
+  "2": "TRADE",
+  "3": "INDEX_VALUE",
+  "4": "OPENING_PRICE",
+  "5": "CLOSING_PRICE",
+  "6": "SETTLEMENT_PRICE",
+  "7": "TRADING_SESSION_HIGH_PRICE",
+  "8": "TRADING_SESSION_LOW_PRICE",
+};
+
+interface MarketDataMessage {
+  symbol: string;
+  type: "BID" | "ASK";
+  price: number;
+  quantity: number;
+  timestamp: string;
+  rawData: Record<string, string>;
+}
+
+ interface TickData {
+  symbol: string;
+  price: number;
+  timestamp: Date;
+  lots: number;
+}
+
+ interface ParsedFixMessage {
+  messageType: string;
+  senderCompId: string;
+  targetCompId: string;
+  msgSeqNum: number;
+  sendingTime: string;
+  rawMessage: string;
+  testReqId?: string;
+  username?: string;
+  additionalFields: Record<string, string>;
+}
+
+ interface CurrencyPairInfo {
+  currpair: string;
+  contractsize: number | null;
+}
+
+ interface WebSocketClient {
+  currencyPairs: string[];
+  fsyms: string[];
+  tsyms: string[];
+}
+
 
 const pgPool = new Pool({
   host: PG_HOST,
@@ -105,10 +165,41 @@ const broadcastTickData = (currencyPair: string, price: number, timestamp: Date,
   });
 };
 
+const getUTCTimestamp = (): string => {
+  const now = new Date();
+  return `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(
+    2,
+    "0"
+  )}${String(now.getUTCDate()).padStart(2, "0")}-${String(
+    now.getUTCHours()
+  ).padStart(2, "0")}:${String(now.getUTCMinutes()).padStart(2, "0")}:${String(
+    now.getUTCSeconds()
+  ).padStart(2, "0")}.${String(now.getUTCMilliseconds()).padStart(3, "0")}`;
+};
+
+ const calculateChecksum = (message: string): string => {
+  let sum = 0;
+  for (let i = 0; i < message.length; i++) {
+    sum += message.charCodeAt(i);
+  }
+  return (sum % 256).toString().padStart(3, "0");
+};
+
+
+ const calculateLots = (quantity: number, contractSize: number): number => {
+  console.log(
+    `Calculating lots: ${quantity} / ${contractSize} = ${Math.round(
+      quantity / contractSize
+    )}`
+  );
+  return Math.round(quantity / contractSize);
+};
+
+
 const marketDataQueue = new Bull("marketData", {
   redis: {
     host: REDIS_HOST,
-    port: REDIS_PORT,
+    port: Number(REDIS_PORT),
   },
   defaultJobOptions: {
     attempts: 3,
