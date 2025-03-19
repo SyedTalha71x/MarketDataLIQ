@@ -181,7 +181,6 @@ const broadcastTickData = (currencyPair: string, price: number, timestamp: Date,
     }
   });
 };
-
 const getUTCTimestamp = (): string => {
   const now = new Date();
   return `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(
@@ -411,7 +410,7 @@ marketDataQueue.process(5, async (job) => {
       `✓ Successfully saved ${data.type} data for ${data.symbol} to database in ${tableName}`
     );
 
-    broadcastTickData(data.symbol, data.price, ticktime, lots, data.type);
+    // broadcastTickData(data.symbol, data.price, ticktime, lots, data.type);
 
     return { success: true, symbol: data.symbol, type: data.type };
   } catch (error) {
@@ -755,6 +754,8 @@ class FixClient {
                       "273": time,
                     },
                   };
+
+                  broadcastTickData(symbol, price, new Date(), size, type as "BID" | "ASK");
 
                   console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
                   marketDataQueue.add(marketData, {
