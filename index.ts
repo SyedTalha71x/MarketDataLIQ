@@ -39,7 +39,7 @@ if (
 
 
 const wss = new WebSocketServer({ port: Number(WS_PORT) || 8080 });
-console.log(`WebSocket server is running on ws://localhost:${WS_PORT || 8080}`);
+console.log(`WebSocket server is running on ws://50.19.20.84:${WS_PORT || 8080}`);
 
 console.log(FIX_SERVER,FIX_PORT,SENDER_COMP_ID, TARGET_COMP_ID, USERNAME, PASSWORD, PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE,REDIS_HOST,REDIS_PORT,WS_PORT     );
 

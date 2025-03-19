@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebSocket Test</title>
+</head>
+<body>
+  <h1>WebSocket Test</h1>
+  <div>
+    <p>Connection Status: <span id="status">Disconnected</span></p>
+    <button id="connectButton">Connect</button>
+    <button id="disconnectButton">Disconnect</button>
+  </div>
+  <div>
+    <h2>Received Messages:</h2>
+    <ul id="messages"></ul>
+  </div>
+
+  <script>
+    let socket;
+    const statusElement = document.getElementById("status");
+    const messagesElement = document.getElementById("messages");
+    const connectButton = document.getElementById("connectButton");
+    const disconnectButton = document.getElementById("disconnectButton");
+
+    // WebSocket server URL (replace with your server's URL)
+    const wsUrl = "ws://50.19.20.84:8080";
+
+    // Function to connect to the WebSocket server
+    function connect() {
+      socket = new WebSocket(wsUrl);
+
+      socket.onopen = () => {
+        statusElement.textContent = "Connected";
+        console.log("WebSocket connection established");
+      };
+
+      socket.onmessage = (event) => {
+        const message = event.data;
+        console.log("Received message:", message);
+
+        // Display the message in the list
+        const li = document.createElement("li");
+        li.textContent = message;
+        messagesElement.appendChild(li);
+      };
+
+      socket.onclose = () => {
+        statusElement.textContent = "Disconnected";
+        console.log("WebSocket connection closed");
+      };
+
+      socket.onerror = (error) => {
+        console.error("WebSocket error:", error);
+      };
+    }
+
+    // Function to disconnect from the WebSocket server
+    function disconnect() {
+      if (socket) {
+        socket.close();
+      }
+    }
+
+    // Event listeners for buttons
+    connectButton.addEventListener("click", connect);
+    disconnectButton.addEventListener("click", disconnect);
+  </script>
+</body>
+</html>
