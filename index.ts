@@ -430,19 +430,24 @@ marketDataQueue.process(5, async (job) => {
     console.log(`Executing query for ${tableName}:`, query.text);
     console.log(`Query values:`, query.values);
 
+    const payload = `${data.symbol}, ${lots}, ${data.type === 'BID' ? 'B' : 'A'} ${data.price} ${ticktime}`;
+
+    const query2 = `NOTIFY tick, '${payload}'`;
+
+    await pgPool.query(query2);
     await pgPool.query(query);
     console.log(
       `✓ Successfully saved ${data.type} data for ${data.symbol} to database in ${tableName}`
     );
 
-    if (data.type === "BID") {
-      await processTickForCandles({
-        symbol: data.symbol,
-        price: data.price,
-        timestamp: ticktime,
-        lots: lots,
-      });
-    }
+    // if (data.type === "BID") {
+    //   await processTickForCandles({
+    //     symbol: data.symbol,
+    //     price: data.price,
+    //     timestamp: ticktime,
+    //     lots: lots,
+    //   });
+    // }
 
     return { success: true, symbol: data.symbol, type: data.type };
   } catch (error) {
@@ -863,8 +868,7 @@ class FixClient {
             for (let i = 0; i < mdEntries.length; i++) {
               const entry = mdEntries[i];
               console.log(
-                `Entry ${i + 1} - Type: ${entry["269"]}, Price: ${
-                  entry["270"]
+                `Entry ${i + 1} - Type: ${entry["269"]}, Price: ${entry["270"]
                 }, Size: ${entry["271"]}`
               );
 
@@ -1080,7 +1084,7 @@ class FixClient {
       // Add a small delay between requests to prevent overwhelming the server
       if (pairsToSubscribe.indexOf(pair) < pairsToSubscribe.length - 1) {
         console.log("Waiting before sending next subscription...");
-        setTimeout(() => {}, 200);
+        setTimeout(() => { }, 200);
       }
     }
   }
