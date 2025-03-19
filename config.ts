@@ -19,6 +19,8 @@ export const PG_DATABASE = process.env.PG_DATABASE;
 export const REDIS_HOST = process.env.REDIS_HOST || "localhost";
 export const REDIS_PORT = parseInt(process.env.REDIS_PORT || "6379");
 
+export const WS_PORT = 8080
+
 export const timeFrames = {
   M1: 60000, // 1 minute (60000 ms)
   H1: 3600000, // 1 hour (3600000 ms)

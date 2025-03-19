@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Tester</title>
+    <style>
+        #log {
+            height: 400px;
+            overflow-y: scroll;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h2>WebSocket Currency Pair Tester</h2>
+    <div>
+        <button id="connect">Connect</button>
+        <button id="disconnect">Disconnect</button>
+    </div>
+    <div>
+        <input id="symbol" placeholder="Currency Symbol (e.g. BTC~USD)" />
+        <button id="subscribe">Subscribe</button>
+        <button id="unsubscribe">Unsubscribe</button>
+    </div>
+    <div>
+        <h3>Log:</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let socket;
+        const logElement = document.getElementById('log');
+        
+        function log(message) {
+            const entry = document.createElement('div');
+            entry.textContent = `${new Date().toISOString()}: ${message}`;
+            logElement.appendChild(entry);
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        document.getElementById('connect').addEventListener('click', () => {
+            socket = new WebSocket(`ws://localhost:${WS_PORT || 8080}`);
+            
+            socket.onopen = () => {
+                log('Connected to WebSocket server');
+            };
+            
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                log(`Received data: ${JSON.stringify(data)}`);
+            };
+            
+            socket.onclose = () => {
+                log('Disconnected from WebSocket server');
+            };
+            
+            socket.onerror = (error) => {
+                log(`Error: ${error.message}`);
+            };
+        });
+        
+        document.getElementById('disconnect').addEventListener('click', () => {
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+        });
+        
+        document.getElementById('subscribe').addEventListener('click', () => {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                log('Socket not connected');
+                return;
+            }
+            
+            const symbol = document.getElementById('symbol').value;
+            if (!symbol) {
+                log('Please enter a currency symbol');
+                return;
+            }
+            
+            const subscribeMsg = {
+                action: "SubAdd",
+                subs: [`5~CCCAGG~${symbol}`]
+            };
+            
+            socket.send(JSON.stringify(subscribeMsg));
+            log(`Subscribed to: ${symbol}`);
+        });
+        
+        document.getElementById('unsubscribe').addEventListener('click', () => {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                log('Socket not connected');
+                return;
+            }
+            
+            const symbol = document.getElementById('symbol').value;
+            if (!symbol) {
+                log('Please enter a currency symbol');
+                return;
+            }
+            
+            const unsubscribeMsg = {
+                action: "SubRemove",
+                subs: [`5~CCCAGG~${symbol}`]
+            };
+            
+            socket.send(JSON.stringify(unsubscribeMsg));
+            log(`Unsubscribed from: ${symbol}`);
+        });
+    </script>
+</body>
+</html>
