@@ -5,6 +5,8 @@ const { Pool } = pkg;
 import Bull from "bull";
 import { configDotenv } from "dotenv";
 
+configDotenv();
+
 const FIX_SERVER = process.env.FIX_SERVER;
 const FIX_PORT = process.env.FIX_PORT;
 const SENDER_COMP_ID = process.env.SENDER_COMP_ID;
@@ -38,7 +40,6 @@ if (
 
 const wss = new WebSocketServer({ port: Number(WS_PORT) || 8080 });
 console.log(`WebSocket server is running on ws://localhost:${WS_PORT || 8080}`);
-configDotenv();
 
 console.log(FIX_SERVER,FIX_PORT,SENDER_COMP_ID, TARGET_COMP_ID, USERNAME, PASSWORD, PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE,REDIS_HOST,REDIS_PORT,WS_PORT     );
 
