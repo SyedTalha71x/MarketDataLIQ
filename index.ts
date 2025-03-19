@@ -531,48 +531,48 @@ candleProcessingQueue.process(async (job) => {
         // Update existing candle
         const currentCandle = existingCandle.rows[0];
 
-        const updateQuery = {
-          text: `
-            UPDATE ${tableName}
-            SET high = GREATEST(high, $1),
-                low = LEAST(low, $2),
-                close = $3
-            WHERE candlesize = $4
-            AND lots = $5
-            AND candletime = $6
-          `,
-          values: [
-            price,
-            price,
-            price,
-            timeframe,
-            lots,
-            candleTime.toISOString(),
-          ],
-        };
+        // const updateQuery = {
+        //   text: `
+        //     UPDATE ${tableName}
+        //     SET high = GREATEST(high, $1),
+        //         low = LEAST(low, $2),
+        //         close = $3
+        //     WHERE candlesize = $4
+        //     AND lots = $5
+        //     AND candletime = $6
+        //   `,
+        //   values: [
+        //     price,
+        //     price,
+        //     price,
+        //     timeframe,
+        //     lots,
+        //     candleTime.toISOString(),
+        //   ],
+        // };
 
-        await pgPool.query(updateQuery);
-        console.log(`Updated ${timeframe} candle for ${symbol}`);
+        // await pgPool.query(updateQuery);
+        // console.log(`Updated ${timeframe} candle for ${symbol}`);
       } else {
-        const insertQuery = {
-          text: `
-            INSERT INTO ${tableName}
-            (candlesize, lots, candletime, open, high, low, close)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-          `,
-          values: [
-            timeframe,
-            lots,
-            candleTime.toISOString(),
-            price, // open
-            price, // high (same as open for new candle)
-            price, // low (same as open for new candle)
-            price, // close (same as open for new candle)
-          ],
-        };
+        // const insertQuery = {
+        //   text: `
+        //     INSERT INTO ${tableName}
+        //     (candlesize, lots, candletime, open, high, low, close)
+        //     VALUES ($1, $2, $3, $4, $5, $6, $7)
+        //   `,
+        //   values: [
+        //     timeframe,
+        //     lots,
+        //     candleTime.toISOString(),
+        //     price, // open
+        //     price, // high (same as open for new candle)
+        //     price, // low (same as open for new candle)
+        //     price, // close (same as open for new candle)
+        //   ],
+        // };
 
-        await pgPool.query(insertQuery);
-        console.log(`Created new ${timeframe} candle for ${symbol}`);
+        // await pgPool.query(insertQuery);
+        // console.log(`Created new ${timeframe} candle for ${symbol}`);
       }
     } catch (error) {
       console.error(
