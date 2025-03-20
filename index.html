@@ -294,7 +294,7 @@
               const data = JSON.parse(event.data);
               const type = data.bora === "B" ? "BID" : "ASK";
               const typeClass = data.bora === "B" ? "bid" : "ask";
-              const currPair = data.currpair;
+              const currPair = data.currpair || `${data.fsym}${data.tsym}`; // Use currpair if available, or construct from fsym+tsym
 
               log(
                 `Received ${type} for ${currPair}: ${data.price} (Lots: ${data.lots})`,

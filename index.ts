@@ -200,7 +200,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-// Broadcast tick data to websocket clients
 const broadcastTickData = (currencyPair, price, timestamp, lotSize, type) => {
   const bora = type === 'BID' ? 'B' : 'A';
   const tickEpoch = Math.floor(timestamp.getTime() / 1000);
@@ -218,12 +217,13 @@ const broadcastTickData = (currencyPair, price, timestamp, lotSize, type) => {
       const tsym = clientData.tsyms[index];
       
       const tickData = {
+        currpair: currencyPair,  // Add the currency pair directly
         fsym: fsym,
         tsym: tsym,
-        p: price,
-        ts: tickEpoch,
+        price: price,           // Change p to price to match frontend expectations
+        lots: lotSize,
         bora: bora,
-        lots: lotSize
+        ts: tickEpoch
       };
       
       const jsonData = JSON.stringify(tickData);
