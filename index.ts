@@ -2,7 +2,6 @@ import { Socket } from "net";
 import { WebSocket, WebSocketServer } from "ws";
 import pkg from "pg";
 const { Pool } = pkg;
-import Bull from "bull";
 import { configDotenv } from "dotenv";
 
 configDotenv();
@@ -20,8 +19,6 @@ const PG_USER = process.env.PG_USER;
 const PG_PASSWORD = process.env.PG_PASSWORD;
 const PG_DATABASE = process.env.PG_DATABASE;
 
-const REDIS_HOST = process.env.REDIS_HOST || "localhost";
-const REDIS_PORT = parseInt(process.env.REDIS_PORT || "6379");
 const WS_PORT = process.env.WS_PORT || 8080;
 
 if (
@@ -37,28 +34,10 @@ if (
   );
 }
 
-
 const wss = new WebSocketServer({ port: Number(WS_PORT) || 8080 });
 console.log(`WebSocket server is running on ws://50.19.20.84:${WS_PORT || 8080}`);
 
-console.log(FIX_SERVER,FIX_PORT,SENDER_COMP_ID, TARGET_COMP_ID, USERNAME, PASSWORD, PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE,REDIS_HOST,REDIS_PORT,WS_PORT     );
-
-// Track all connected WebSocket clients (no subscription data needed)
-const wsClients = new Set<WebSocket>();
-
-if (
-  !FIX_SERVER ||
-  !FIX_PORT ||
-  !SENDER_COMP_ID ||
-  !TARGET_COMP_ID ||
-  !USERNAME ||
-  !PASSWORD
-) {
-  console.log(
-    "One or more required environment variables are missing, using sample mode."
-  );
-}
-
+const wsClients = new Map();
 
 const timeFrames = {
   M1: 60000, // 1 minute (60000 ms)
@@ -66,7 +45,7 @@ const timeFrames = {
   D1: 86400000, // 1 day (86400000 ms)
 };
 
-const MESSAGE_TYPES: Record<string, string> = {
+const MESSAGE_TYPES = {
   "0": "Heartbeat",
   "1": "Test Request",
   "2": "Resend Request",
@@ -79,7 +58,7 @@ const MESSAGE_TYPES: Record<string, string> = {
   X: "Market Data Incremental Refresh",
 };
 
-const MD_ENTRY_TYPES: Record<string, string> = {
+const MD_ENTRY_TYPES = {
   "0": "BID",
   "1": "ASK",
   "2": "TRADE",
@@ -91,6 +70,7 @@ const MD_ENTRY_TYPES: Record<string, string> = {
   "8": "TRADING_SESSION_LOW_PRICE",
 };
 
+// Define interfaces for type safety
 interface MarketDataMessage {
   symbol: string;
   type: "BID" | "ASK";
@@ -100,14 +80,14 @@ interface MarketDataMessage {
   rawData: Record<string, string>;
 }
 
- interface TickData {
+interface TickData {
   symbol: string;
   price: number;
   timestamp: Date;
   lots: number;
 }
 
- interface ParsedFixMessage {
+interface ParsedFixMessage {
   messageType: string;
   senderCompId: string;
   targetCompId: string;
@@ -119,18 +99,18 @@ interface MarketDataMessage {
   additionalFields: Record<string, string>;
 }
 
- interface CurrencyPairInfo {
+interface CurrencyPairInfo {
   currpair: string;
   contractsize: number | null;
 }
 
- interface WebSocketClient {
+interface WebSocketClient {
   currencyPairs: string[];
   fsyms: string[];
   tsyms: string[];
 }
 
-
+// Initialize PostgreSQL connection for fetching currency pairs only
 const pgPool = new Pool({
   host: PG_HOST,
   port: PG_PORT ? Number(PG_PORT) : 5432,
@@ -141,13 +121,73 @@ const pgPool = new Pool({
 
 let sequenceNumber = 0;
 let isConnected = false;
-let reconnectTimeout: NodeJS.Timeout | null = null;
+let reconnectTimeout = null;
 
+// Handle WebSocket connections
 wss.on("connection", (ws) => {
   console.log("New WebSocket client connected");
-  
-  // Add client to set of connected clients
-  wsClients.add(ws);
+
+  // Initialize client data
+  const clientData = {
+    currencyPairs: [],
+    fsyms: [],
+    tsyms: [],
+  };
+
+  wsClients.set(ws, clientData);
+
+  // Handle client messages
+  ws.on("message", (message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      console.log("WebSocket message received:", data);
+
+      if (data.action === "SubAdd") {
+        // Subscribe to currency pairs
+        if (data.subs && Array.isArray(data.subs)) {
+          data.subs.forEach((sub) => {
+            const fields = sub.split("~");
+            const fsym = fields[fields.length - 2];
+            const tsym = fields[fields.length - 1];
+            const currPair = fsym + tsym;
+
+            clientData.currencyPairs.push(currPair);
+            clientData.fsyms.push(fsym);
+            clientData.tsyms.push(tsym);
+          });
+
+          console.log(
+            `Client subscribed to: ${clientData.currencyPairs.join(", ")}`
+          );
+        }
+      } else if (data.action === "SubRemove") {
+        // Unsubscribe from currency pairs
+        if (data.subs && Array.isArray(data.subs)) {
+          data.subs.forEach((sub) => {
+            const fields = sub.split("~");
+            const fsym = fields[fields.length - 2];
+            const tsym = fields[fields.length - 1];
+            const currPair = fsym + tsym;
+
+            const index = clientData.currencyPairs.indexOf(currPair);
+            if (index !== -1) {
+              clientData.currencyPairs.splice(index, 1);
+              clientData.fsyms.splice(index, 1);
+              clientData.tsyms.splice(index, 1);
+            }
+          });
+
+          console.log(
+            `Client unsubscribed from pairs. Remaining subscriptions: ${clientData.currencyPairs.join(
+              ", "
+            )}`
+          );
+        }
+      }
+    } catch (error) {
+      console.error("Error processing WebSocket message:", error);
+    }
+  });
 
   ws.on("close", () => {
     console.log("WebSocket client disconnected");
@@ -160,28 +200,45 @@ wss.on("connection", (ws) => {
   });
 });
 
-const broadcastTickData = (currencyPair: string, price: number, timestamp: Date, lotSize: number, type: 'BID' | 'ASK') => {
+// Broadcast tick data to websocket clients
+const broadcastTickData = (currencyPair, price, timestamp, lotSize, type) => {
   const bora = type === 'BID' ? 'B' : 'A';
   const tickEpoch = Math.floor(timestamp.getTime() / 1000);
   
-  const tickData = {
-    currpair: currencyPair,
-    price: price,
-    ts: tickEpoch,
-    bora: bora,
-    lots: lotSize
-  };
+  if (currencyPair === 'DJIUSD') {
+    console.log(`DJIUSD tick ${currencyPair} ${lotSize} ${bora} ${price} ${tickEpoch}`);
+  }
   
-  const jsonData = JSON.stringify(tickData);
-  console.log(`Broadcasting to all clients: ${jsonData}`);
-  
-  wsClients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(jsonData);
+  // Broadcast to all WebSocket clients that are subscribed to this currency pair
+  wsClients.forEach((clientData, ws) => {
+    const index = clientData.currencyPairs.indexOf(currencyPair);
+    
+    if (index !== -1) {
+      const fsym = clientData.fsyms[index];
+      const tsym = clientData.tsyms[index];
+      
+      const tickData = {
+        fsym: fsym,
+        tsym: tsym,
+        p: price,
+        ts: tickEpoch,
+        bora: bora,
+        lots: lotSize
+      };
+      
+      const jsonData = JSON.stringify(tickData);
+      console.log(`Broadcasting to client: ${jsonData}`);
+      
+      // Send to client if connection is open
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(jsonData);
+      }
     }
   });
 };
-const getUTCTimestamp = (): string => {
+
+// Helper functions
+const getUTCTimestamp = () => {
   const now = new Date();
   return `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(
     2,
@@ -193,7 +250,7 @@ const getUTCTimestamp = (): string => {
   ).padStart(2, "0")}.${String(now.getUTCMilliseconds()).padStart(3, "0")}`;
 };
 
- const calculateChecksum = (message: string): string => {
+const calculateChecksum = (message) => {
   let sum = 0;
   for (let i = 0; i < message.length; i++) {
     sum += message.charCodeAt(i);
@@ -201,8 +258,7 @@ const getUTCTimestamp = (): string => {
   return (sum % 256).toString().padStart(3, "0");
 };
 
-
- const calculateLots = (quantity: number, contractSize: number): number => {
+const calculateLots = (quantity, contractSize) => {
   console.log(
     `Calculating lots: ${quantity} / ${contractSize} = ${Math.round(
       quantity / contractSize
@@ -211,77 +267,19 @@ const getUTCTimestamp = (): string => {
   return Math.round(quantity / contractSize);
 };
 
-
-const marketDataQueue = new Bull("marketData", {
-  redis: {
-    host: REDIS_HOST,
-    port: Number(REDIS_PORT),
-  },
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: "exponential",
-      delay: 1000,
-    },
-    removeOnComplete: true,
-    timeout: 30000, // Increase job timeout to 30 seconds
-  },
-  limiter: {
-    max: 100, // Max jobs processed per second
-    duration: 1000,
-  },
-  settings: {
-    maxStalledCount: 1, // Prevent jobs from being marked as stalled too quickly
-  },
-});
-
 // Store available currency pairs
-let availableCurrencyPairs: CurrencyPairInfo[] = [];
+let availableCurrencyPairs = [];
 
 // Track subscribed currency pairs
-const subscribedPairs: Set<string> = new Set();
+const subscribedPairs = new Set();
 
-const ensureTableExists = async (
-  tableName: string,
-  type: "BID" | "ASK"
-): Promise<void> => {
-  try {
-    const tableCheck = await pgPool.query(
-      `
-      SELECT EXISTS (
-          SELECT FROM information_schema.tables
-          WHERE table_schema = 'public'
-          AND table_name = $1
-      )
-      `,
-      [tableName]
-    );
-
-    if (!tableCheck.rows[0].exists) {
-      console.log(`Table ${tableName} does not exist, creating it...`);
-
-      await pgPool.query(`
-          CREATE TABLE ${tableName} (
-              ticktime TIMESTAMP WITH TIME ZONE NOT NULL,
-              lots INTEGER PRIMARY KEY,
-              price NUMERIC NOT NULL
-          )
-      `);
-
-      console.log(`Created table ${tableName}`);
-    }
-  } catch (error) {
-    console.error(`Error ensuring table ${tableName} exists:`, error);
-    throw error;
-  }
-};
-
-const initDatabase = async () => {
+// Initialize and fetch currency pairs from database
+const initCurrencyPairs = async () => {
   try {
     await fetchAllCurrencyPairs();
-    console.log("Database tables initialized successfully");
+    console.log("Currency pairs fetched successfully");
   } catch (error) {
-    console.error("Error initializing database tables:", error);
+    console.error("Error fetching currency pairs:", error);
   }
 };
 
@@ -322,25 +320,34 @@ const fetchAllCurrencyPairs = async () => {
     });
 
     console.log("Subscribed pairs:", Array.from(subscribedPairs));
-
-    for (const pair of validPairs) {
-      await ensureTableExists(
-        `ticks_${pair.currpair.toLowerCase()}_bid`,
-        "BID"
-      );
-      await ensureTableExists(
-        `ticks_${pair.currpair.toLowerCase()}_ask`,
-        "ASK"
-      );
-    }
+    return true;
   } catch (error) {
     console.error("Error fetching currency pairs:", error);
+    return false;
   }
 };
 
-const createFixMessage = (
-  body: Record<number | string, string | number>
-): string => {
+const getContractSize = (symbol) => {
+  try {
+    const pairInfo = availableCurrencyPairs.find(
+      (pair) => pair.currpair === symbol
+    );
+
+    if (pairInfo && pairInfo.contractsize !== null) {
+      return parseFloat(pairInfo.contractsize.toString());
+    } else {
+      console.warn(
+        `Warning: Received data for ${symbol} which has no contract size or wasn't subscribed`
+      );
+      return 100000; // Default contract size as fallback
+    }
+  } catch (error) {
+    console.error(`Error getting contract size for ${symbol}:`, error);
+    return 100000; // Default contract size as fallback
+  }
+};
+
+const createFixMessage = (body) => {
   sequenceNumber += 1;
 
   const messageBody = [
@@ -360,115 +367,8 @@ const createFixMessage = (
   return `${fullMessage}\u000110=${checksum}\u0001`;
 };
 
-marketDataQueue.process(5, async (job) => {
-  try {
-    const data: MarketDataMessage = job.data;
-    console.log(`Processing market data job for ${data.symbol} (${data.type})`);
-
-    const contractSize = await getContractSize(data.symbol);
-    console.log(`Got contract size: ${contractSize} for ${data.symbol}`);
-
-    const lots = calculateLots(data.quantity, contractSize);
-    console.log(
-      `Calculated lots: ${lots} (${data.quantity} / ${contractSize})`
-    );
-
-    // Format time from data.timestamp
-    let ticktime = new Date();
-    if (data.rawData["273"]) {
-      const timeStr = data.rawData["273"];
-      const [hours, minutes, seconds] = timeStr.split(":").map(Number);
-      ticktime = new Date();
-      ticktime.setHours(hours, minutes, seconds);
-    }
-
-    let tableName: string;
-    const symbolLower = data.symbol.toLowerCase();
-
-    if (data.type === "BID") {
-      tableName = `ticks_${symbolLower}_bid`;
-    } else {
-      tableName = `ticks_${symbolLower}_ask`;
-    }
-
-    await ensureTableExists(tableName, data.type);
-
-    const query = {
-      text: `
-              INSERT INTO ${tableName} 
-              (ticktime, lots, price)
-              VALUES ($1, $2, $3)
-          `,
-      values: [ticktime.toISOString(), lots, data.price],
-    };
-
-    console.log(`Executing query for ${tableName}:`, query.text);
-    console.log(`Query values:`, query.values);
-
-    await pgPool.query(query);
-    console.log(
-      `✓ Successfully saved ${data.type} data for ${data.symbol} to database in ${tableName}`
-    );
-
-    // broadcastTickData(data.symbol, data.price, ticktime, lots, data.type);
-
-    return { success: true, symbol: data.symbol, type: data.type };
-  } catch (error) {
-    console.error(`Error processing market data job:`, error);
-    throw error;
-  }
-});
-
-marketDataQueue.on("completed", (job, result) => {
-  console.log(`Job ${job.id} completed: ${result.symbol} ${result.type}`);
-});
-
-marketDataQueue.on("failed", (job, error) => {
-  console.error(`Job ${job.id} failed:`, error);
-});
-
-const getContractSize = async (symbol: string): Promise<number> => {
-  try {
-    const pairInfo = availableCurrencyPairs.find(
-      (pair) => pair.currpair === symbol
-    );
-
-    if (pairInfo && pairInfo.contractsize !== null) {
-      return parseFloat(pairInfo.contractsize.toString());
-    } else {
-      console.warn(
-        `Warning: Received data for ${symbol} which has no contract size or wasn't subscribed`
-      );
-
-      // Try to get the contract size directly from the database as a fallback
-      try {
-        const result = await pgPool.query(
-          "SELECT contractsize FROM currpairdetails WHERE currpair = $1",
-          [symbol]
-        );
-
-        if (result.rows.length > 0 && result.rows[0].contractsize !== null) {
-          console.log(
-            `Found contract size in database: ${result.rows[0].contractsize} for ${symbol}`
-          );
-          return parseFloat(result.rows[0].contractsize.toString());
-        }
-      } catch (dbError) {
-        console.error(`Database lookup for contract size failed:`, dbError);
-      }
-
-      throw new Error(
-        `Cannot process data for ${symbol}: No valid contract size found`
-      );
-    }
-  } catch (error) {
-    console.error(`Error getting contract size for ${symbol}:`, error);
-    throw new Error(`Cannot process market data: ${error.message}`);
-  }
-};
-
 class FixClient {
-  private client!: Socket;
+  private client: Socket | null;
   private reconnectAttempts: number = 0;
   private readonly maxReconnectAttempts: number = 1000;
   private readonly reconnectDelay: number = 5000;
@@ -476,21 +376,29 @@ class FixClient {
   private heartbeatInterval: NodeJS.Timeout | null = null;
 
   constructor() {
+    this.client = null;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 1000;
+    this.reconnectDelay = 5000;
+    this.buffer = "";
+    this.heartbeatInterval = null;
+    
     this.initializeClient();
-    // Initialize database
-    initDatabase().catch((err) => {
-      console.error("Failed to initialize database:", err);
+    
+    // Initialize currency pairs
+    initCurrencyPairs().catch((err) => {
+      console.error("Failed to initialize currency pairs:", err);
     });
   }
 
-  private initializeClient() {
+  initializeClient() {
     this.client = new Socket();
     this.client.setKeepAlive(true, 30000);
     this.client.setNoDelay(true);
     this.setupEventHandlers();
   }
 
-  private setupEventHandlers() {
+  setupEventHandlers() {
     this.client.on("connect", this.handleConnect.bind(this));
     this.client.on("data", this.handleData.bind(this));
     this.client.on("error", this.handleError.bind(this));
@@ -498,7 +406,7 @@ class FixClient {
     this.client.on("end", this.handleEnd.bind(this));
   }
 
-  private setupHeartbeat() {
+  setupHeartbeat() {
     // Clear any existing heartbeat interval
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
@@ -516,9 +424,9 @@ class FixClient {
     }, 20000);
   }
 
-  private parseFixMessage(message: string): ParsedFixMessage {
+  parseFixMessage(message) {
     const fields = message.split("\u0001");
-    const fieldMap: Record<string, string> = {};
+    const fieldMap = {};
 
     // Parse all fields into key-value pairs
     fields.forEach((field) => {
@@ -530,8 +438,7 @@ class FixClient {
 
     // Extract common fields
     const messageType = fieldMap["35"];
-    const readableType =
-      MESSAGE_TYPES[messageType] || `Unknown (${messageType})`;
+    const readableType = MESSAGE_TYPES[messageType] || `Unknown (${messageType})`;
 
     const parsed: ParsedFixMessage = {
       messageType: readableType,
@@ -554,17 +461,14 @@ class FixClient {
           key
         )
       ) {
-        parsed.additionalFields[key] = value;
+        parsed.additionalFields[key] = value as string;
       }
     });
 
     return parsed;
   }
 
-  private logParsedMessage(
-    parsed: ParsedFixMessage,
-    direction: "Sent" | "Received"
-  ) {
+  logParsedMessage(parsed, direction) {
     const timestamp = new Date().toISOString();
     console.log("\n" + "=".repeat(80));
     console.log(`${direction} at ${timestamp}`);
@@ -588,12 +492,12 @@ class FixClient {
     console.log("=".repeat(80) + "\n");
   }
 
-  private handleConnect() {
+  handleConnect() {
     console.log("Connected to FIX server");
     this.sendLogon();
   }
 
-  private sendLogon() {
+  sendLogon() {
     isConnected = true;
     this.reconnectAttempts = 0;
     this.buffer = "";
@@ -616,7 +520,7 @@ class FixClient {
     this.setupHeartbeat();
   }
 
-  private handleTestRequest(testReqId: string) {
+  handleTestRequest(testReqId) {
     // Respond to test request with a heartbeat message
     const heartbeatMessage = createFixMessage({
       35: "0", // Heartbeat
@@ -627,7 +531,7 @@ class FixClient {
     console.log(`Responded to test request with heartbeat, TestReqID: ${testReqId}`);
   }
 
-  private handleData(data: Buffer) {
+  handleData(data) {
     // Append the new data to our buffer
     this.buffer += data.toString();
 
@@ -669,7 +573,7 @@ class FixClient {
 
             // Extract all fields directly from the raw message
             const rawFields = message.split("\u0001");
-            const fieldMap: Record<string, string> = {};
+            const fieldMap = {};
 
             rawFields.forEach((field) => {
               const [tag, value] = field.split("=");
@@ -679,8 +583,8 @@ class FixClient {
             });
 
             // Find all repeating group entries in the original message
-            const mdEntries: Array<Record<string, string>> = [];
-            let currentEntry: Record<string, string> = {};
+            const mdEntries = [];
+            let currentEntry = {};
             let inEntry = false;
 
             // Process the fields in order
@@ -737,33 +641,15 @@ class FixClient {
                     `Found ${type} entry for ${symbol}: Price=${price}, Size=${size}`
                   );
 
-                  // Create market data message and add to queue
-                  const marketData: MarketDataMessage = {
-                    symbol,
-                    type: type as "BID" | "ASK",
-                    price,
-                    quantity: size,
-                    timestamp: new Date().toISOString(),
-                    rawData: {
-                      "55": symbol,
-                      "262": parsed.additionalFields["262"] || "",
-                      "268": parsed.additionalFields["268"] || "",
-                      "269": entryType,
-                      "270": price.toString(),
-                      "271": size.toString(),
-                      "273": time,
-                    },
-                  };
+                  // Get contract size for calculating lots
+                  const contractSize = getContractSize(symbol);
+                  const lots = calculateLots(size, contractSize);
 
-                  broadcastTickData(symbol, price, new Date(), size, type as "BID" | "ASK");
-
-                  console.log(`Adding to queue: ${JSON.stringify(marketData)}`);
-                  marketDataQueue.add(marketData, {
-                    jobId: `${symbol}_${type}_${Date.now()}`,
-                  });
-
+                  // Broadcast data to websocket clients directly
+                  broadcastTickData(symbol, price, new Date(), lots, type);
+                  
                   console.log(
-                    `Added ${type} data for ${symbol} to queue: ${price}`
+                    `Broadcasted ${type} data for ${symbol}: Price=${price}, Lots=${lots}`
                   );
                 }
               }
@@ -800,8 +686,8 @@ class FixClient {
   }
 
   // Extract complete FIX messages from the buffer
-  private extractMessages(): string[] {
-    const messages: string[] = [];
+  extractMessages() {
+    const messages = [];
     const delimiter = "\u000110=";
     let position = 0;
 
@@ -832,7 +718,7 @@ class FixClient {
     return messages;
   }
 
-  private handleError(err: Error) {
+  handleError(err) {
     console.log("Socket error:", err.message);
     if (isConnected) {
       isConnected = false;
@@ -841,21 +727,21 @@ class FixClient {
     this.reconnect();
   }
 
-  private handleClose(hadError: boolean) {
+  handleClose(hadError) {
     console.log("Connection closed", hadError ? "due to error" : "normally");
     isConnected = false;
     this.cleanupConnection();
     this.reconnect();
   }
 
-  private handleEnd() {
+  handleEnd() {
     console.log("Connection ended");
     isConnected = false;
     this.cleanupConnection();
     this.reconnect();
   }
 
-  private cleanupConnection() {
+  cleanupConnection() {
     // Clean up heartbeat interval
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
@@ -863,7 +749,7 @@ class FixClient {
     }
   }
 
-  private reconnect() {
+  reconnect() {
     if (reconnectTimeout !== null) {
       clearTimeout(reconnectTimeout);
     }
@@ -884,7 +770,7 @@ class FixClient {
     }
   }
 
-  public connect() {
+  connect() {
     try {
       console.log(`Connecting to FIX server at ${FIX_SERVER}:${FIX_PORT}...`);
       this.client.connect(Number(FIX_PORT), FIX_SERVER);
@@ -894,7 +780,7 @@ class FixClient {
     }
   }
 
-  public subscribeToMarketData() {
+  subscribeToMarketData() {
     if (!isConnected) {
       console.log(
         "Not connected to FIX server. Cannot subscribe to market data."
@@ -954,7 +840,7 @@ class FixClient {
     }
   }
 
-  public disconnect() {
+  disconnect() {
     this.cleanupConnection();
     
     if (isConnected) {
@@ -968,10 +854,11 @@ class FixClient {
   }
 }
 
+// Create and connect the FIX client
 const fixClient = new FixClient();
-
 fixClient.connect();
 
+// Handle application shutdown
 process.on("SIGINT", async () => {
   console.log("Shutting down...");
   fixClient.disconnect();
@@ -979,9 +866,7 @@ process.on("SIGINT", async () => {
   console.log("Closing WebSocket server...");
   wss.close();
 
-  console.log("Closing Bull queue...");
-  await marketDataQueue.close();
-
+  console.log("Closing database connection...");
   pgPool.end().then(() => {
     console.log("Database connection closed");
     process.exit(0);
