@@ -3,14 +3,12 @@
         "target": "ES6",
         "module": "NodeNext",
         "moduleResolution": "nodenext",
-        "strict": false,
+        "strict": true,
         "esModuleInterop": true,
         "skipLibCheck": true,
         "forceConsistentCasingInFileNames": true,
         "outDir": "./dist",
-        "resolveJsonModule": true,
-        "noEmit": true,
-        "allowImportingTsExtensions":true
+        "resolveJsonModule": true
     },
     "exclude": [
         "dist",
